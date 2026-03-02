@@ -1,43 +1,74 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+log_ok() { echo "[+] $*"; }
+log_info() { echo "[=] $*"; }
+log_warn() { echo "[!] $*"; }
+
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "[!] Please run as root (e.g. sudo bash ... )"
+  log_warn "Please run as root (e.g. sudo bash ... )"
   exit 1
 fi
 
-echo "[+] Applying UFW rules..."
-ufw deny in 25/tcp
-ufw deny in 587/tcp
-ufw deny in 465/tcp
-ufw deny out 25/tcp
-ufw deny out 587/tcp
-ufw deny out 465/tcp
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    log_warn "Required command not found: $cmd"
+    exit 1
+  fi
+}
 
-ufw allow 443/tcp
-ufw allow 22/tcp
-ufw allow 80/tcp
-ufw allow from 84.200.193.142 to any port 2222
-ufw allow from 109.122.199.37 to any port 9999
-ufw allow from 81.200.151.202 to any port 9999
-ufw allow from 95.85.240.116 to any port 9999
+ensure_ufw_rule() {
+  local rule="$1"
+  if ufw status | grep -Fq "$rule"; then
+    log_info "UFW rule already exists: $rule"
+  else
+    log_ok "Adding UFW rule: $rule"
+    # shellcheck disable=SC2086
+    ufw $rule
+  fi
+}
 
+require_cmd ufw
+require_cmd curl
+require_cmd crontab
+require_cmd docker
+require_cmd apt
+require_cmd systemctl
+
+log_ok "Applying UFW rules..."
+ensure_ufw_rule "deny in 25/tcp"
+ensure_ufw_rule "deny in 587/tcp"
+ensure_ufw_rule "deny in 465/tcp"
+ensure_ufw_rule "deny out 25/tcp"
+ensure_ufw_rule "deny out 587/tcp"
+ensure_ufw_rule "deny out 465/tcp"
+
+ensure_ufw_rule "allow 443/tcp"
+ensure_ufw_rule "allow 22/tcp"
+ensure_ufw_rule "allow 80/tcp"
+ensure_ufw_rule "allow from 84.200.193.142 to any port 2222"
+ensure_ufw_rule "allow from 109.122.199.37 to any port 9999"
+ensure_ufw_rule "allow from 81.200.151.202 to any port 9999"
+ensure_ufw_rule "allow from 95.85.240.116 to any port 9999"
+
+log_ok "Setting UFW default policy..."
 ufw default deny incoming
 ufw --force enable
 systemctl start ufw
 systemctl enable ufw
 
-
-echo "[+] Running system update..."
-apt update && apt upgrade -yqq
+log_ok "Running system update..."
+apt update
+apt upgrade -yqq
 
 SCRIPT_PATH="/usr/local/bin/update-xray-geo.sh"
 XRAY_DIR="/opt/remnanode/xray/share"
 
-echo "[+] Ensuring directories..."
+log_ok "Ensuring directories..."
 mkdir -p "$XRAY_DIR"
 
-echo "[+] Creating update script..."
+log_ok "Creating update script: $SCRIPT_PATH"
 cat << 'EOF' > "$SCRIPT_PATH"
 #!/usr/bin/env bash
 set -euo pipefail
@@ -61,12 +92,12 @@ EOF
 
 chmod +x "$SCRIPT_PATH"
 
-echo "[+] Setting cron job..."
+log_ok "Setting cron job..."
 CRON_LINE="0 7 * * * /usr/local/bin/update-xray-geo.sh"
-( crontab -l 2>/dev/null | grep -v '/usr/local/bin/update-xray-geo.sh' ; echo "$CRON_LINE" ) | crontab -
+( crontab -l 2>/dev/null | grep -Fv '/usr/local/bin/update-xray-geo.sh' || true; echo "$CRON_LINE" ) | crontab -
 
-echo "[+] Running update immediately..."
-/usr/local/bin/update-xray-geo.sh
+log_ok "Running update immediately..."
+"$SCRIPT_PATH"
 
-echo "✅ Done"
-echo "⏰ Scheduled daily at 07:00: /usr/local/bin/update-xray-geo.sh"
+log_ok "Done"
+log_info "Scheduled daily at 07:00: /usr/local/bin/update-xray-geo.sh"
