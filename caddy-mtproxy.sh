@@ -8,7 +8,7 @@
 # VERSION=1.0.0
 
 SCRIPT_VERSION="1.0.0"
-APP_NAME="caddy-mtproxy"
+APP_NAME="mtproxy"
 
 set -euo pipefail
 
@@ -441,8 +441,10 @@ TAG=$tag
 INSTALLED=$(date '+%Y-%m-%d %H:%M:%S')
 EOF
 
-    local proxy_link="tg://proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
-    local web_link="https://t.me/proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local proxy_link_ip="tg://proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local proxy_link_domain="tg://proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
+    local web_link_ip="https://t.me/proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local web_link_domain="https://t.me/proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
 
     cat > "$INSTALL_DIR/info.txt" << EOF
 ═══════════════════════════════════════════
@@ -450,15 +452,21 @@ EOF
 ═══════════════════════════════════════════
 
 🌐 Сайт:     https://${domain}
-🔌 MTProxy:   ${server_ip}:${mtproxy_port}
+🔌 MTProxy:   ${server_ip}:${mtproxy_port} (${domain}:${mtproxy_port})
 🔑 Секрет:    ${secret}
 🏷️  TAG:       ${tag:-не задан}
 
-📱 Ссылка для Telegram:
-   ${proxy_link}
+📱 Ссылка для Telegram (по домену — рекомендуется):
+   ${proxy_link_domain}
 
-🌐 Web ссылка:
-   ${web_link}
+📱 Ссылка для Telegram (по IP):
+   ${proxy_link_ip}
+
+🌐 Web ссылка (по домену):
+   ${web_link_domain}
+
+🌐 Web ссылка (по IP):
+   ${web_link_ip}
 
 📅 Установлено: $(date)
 ═══════════════════════════════════════════
@@ -693,8 +701,9 @@ install_command() {
     install_management_script
 
     # Final output
-    local proxy_link="tg://proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
-    local web_link="https://t.me/proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local proxy_link_domain="tg://proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
+    local proxy_link_ip="tg://proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local web_link_domain="https://t.me/proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
 
     echo
     echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
@@ -715,15 +724,18 @@ install_command() {
 
     echo
     echo -e "  ${WHITE}🌐 Сайт:${NC}     https://$domain"
-    echo -e "  ${WHITE}🔌 MTProxy:${NC}   $server_ip:$mtproxy_port"
+    echo -e "  ${WHITE}🔌 MTProxy:${NC}   $domain:$mtproxy_port ($server_ip:$mtproxy_port)"
     echo -e "  ${WHITE}🔑 Секрет:${NC}    $secret"
     echo
 
-    echo -e "  ${WHITE}📱 Telegram ссылка:${NC}"
-    echo -e "  ${GREEN}$proxy_link${NC}"
+    echo -e "  ${WHITE}📱 Telegram ссылка (по домену — рекомендуется):${NC}"
+    echo -e "  ${GREEN}$proxy_link_domain${NC}"
+    echo
+    echo -e "  ${WHITE}📱 Telegram ссылка (по IP):${NC}"
+    echo -e "  ${GRAY}$proxy_link_ip${NC}"
     echo
     echo -e "  ${WHITE}🌐 Web ссылка:${NC}"
-    echo -e "  ${GREEN}$web_link${NC}"
+    echo -e "  ${GREEN}$web_link_domain${NC}"
     echo
     echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
     echo
@@ -1100,24 +1112,28 @@ links_command() {
     secret=$(grep "^SECRET=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
     server_ip=$(grep "^SERVER_IP=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
 
-    local proxy_link="tg://proxy?server=${server_ip}&port=${port}&secret=${secret}"
-    local web_link="https://t.me/proxy?server=${server_ip}&port=${port}&secret=${secret}"
+    local proxy_link_domain="tg://proxy?server=${domain}&port=${port}&secret=${secret}"
+    local proxy_link_ip="tg://proxy?server=${server_ip}&port=${port}&secret=${secret}"
+    local web_link_domain="https://t.me/proxy?server=${domain}&port=${port}&secret=${secret}"
 
     echo
     echo -e "${WHITE}🔗 Ссылки для подключения${NC}"
     echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
     echo
-    echo -e "  ${WHITE}🌐 Сайт:${NC}      https://$domain"
+    echo -e "  ${WHITE}🌐 Сайт:${NC}       https://$domain"
     echo
-    echo -e "  ${WHITE}📱 Telegram:${NC}"
-    echo -e "  ${GREEN}$proxy_link${NC}"
+    echo -e "  ${WHITE}📱 По домену (рекомендуется):${NC}"
+    echo -e "  ${GREEN}$proxy_link_domain${NC}"
     echo
-    echo -e "  ${WHITE}🌐 Web:${NC}"
-    echo -e "  ${GREEN}$web_link${NC}"
+    echo -e "  ${WHITE}📱 По IP:${NC}"
+    echo -e "  ${GRAY}$proxy_link_ip${NC}"
+    echo
+    echo -e "  ${WHITE}🌐 Web ссылка:${NC}"
+    echo -e "  ${GREEN}$web_link_domain${NC}"
     echo
     echo -e "  ${WHITE}🔑 Секрет:${NC}     $secret"
     echo -e "  ${WHITE}🔌 Порт:${NC}       $port"
-    echo -e "  ${WHITE}🖥️  Сервер:${NC}     $server_ip"
+    echo -e "  ${WHITE}🖥️  Сервер:${NC}     $server_ip ($domain)"
     echo
     echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
     echo
