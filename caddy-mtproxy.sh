@@ -11,13 +11,14 @@
 # ║                                                                ║
 # ║  Based on: telemt (github.com/telemt/telemt)                   ║
 # ╚════════════════════════════════════════════════════════════════╝
-# VERSION=3.1.0
+# VERSION=3.2.0
 
-SCRIPT_VERSION="3.1.0"
+SCRIPT_VERSION="3.2.0"
 APP_NAME="mtproxy"
 SCRIPT_URL="https://raw.githubusercontent.com/ildar58/vpn-tools/main/caddy-mtproxy.sh"
 
 set -euo pipefail
+{  # ← Buffer entire script for curl | bash safety
 
 # ============================================
 # Colors
@@ -535,47 +536,52 @@ install_command() {
 install_management_command() {
     local script_dest="$INSTALL_DIR/$APP_NAME.sh"
     local bin_link="/usr/local/bin/$APP_NAME"
+    local installed=false
 
-    # Determine source: $0 may be /dev/stdin or a pipe when run via curl | bash
-    local script_source
-    script_source=$(readlink -f "$0" 2>/dev/null || echo "$0")
+    # Try multiple sources to get the script into $script_dest
 
-    if [ -f "$script_source" ] && [ "$script_source" != "/dev/stdin" ] && \
-       [ "$script_source" != "/proc/self/fd/0" ] && [ "$script_source" != "-bash" ]; then
-        # Script was run from a file — copy it
+    # 1) If running from a real file — copy it
+    local script_source="${BASH_SOURCE[0]:-$0}"
+    script_source=$(readlink -f "$script_source" 2>/dev/null || echo "$script_source")
+
+    if [ -f "$script_source" ] && \
+       [ "$script_source" != "/dev/stdin" ] && \
+       [ "$script_source" != "/proc/self/fd/0" ] && \
+       [[ "$script_source" != /dev/fd/* ]] && \
+       [ "$script_source" != "-bash" ] && \
+       [ "$script_source" != "bash" ]; then
         cp "$script_source" "$script_dest"
-    elif [ -f "$script_dest" ]; then
-        # Already installed, keep existing
-        log_info "Скрипт уже на месте: $script_dest"
-    else
-        # Piped via curl | bash — download the script
-        log_info "Скачиваем скрипт в $script_dest..."
-        if [ -n "${SCRIPT_URL:-}" ] && [ "$SCRIPT_URL" != "https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/caddy-mtproxy.sh" ]; then
-            curl -fsSL "$SCRIPT_URL" -o "$script_dest"
+        installed=true
+        log_info "Скрипт скопирован из $script_source"
+    fi
+
+    # 2) If not copied and not already present — download from URL
+    if [ "$installed" = false ] && [ ! -s "$script_dest" ]; then
+        log_info "Скачиваем скрипт из репозитория..."
+        if curl -fsSL "$SCRIPT_URL" -o "$script_dest" 2>/dev/null; then
+            installed=true
+            log_success "Скрипт скачан"
         else
-            # Fallback: re-read from stdin is not possible, embed self
-            log_warning "Не удалось определить источник скрипта."
-            log_warning "Скопируйте скрипт вручную в $script_dest"
-            log_warning "Затем выполните: chmod +x $script_dest"
+            log_error "Не удалось скачать скрипт из $SCRIPT_URL"
+            log_warning "Установите вручную:"
+            echo -e "   ${CYAN}curl -fsSL $SCRIPT_URL -o $script_dest && chmod +x $script_dest${NC}"
         fi
+    elif [ -s "$script_dest" ]; then
+        installed=true
     fi
 
     chmod +x "$script_dest" 2>/dev/null || true
 
-    # Create /usr/local/bin wrapper (always overwrite to fix broken installs)
+    # Create /usr/local/bin/mtproxy wrapper (always overwrite)
     cat > "$bin_link" << 'BINEOF'
 #!/usr/bin/env bash
 exec bash "/opt/mtproxy/mtproxy.sh" "$@"
 BINEOF
-
     chmod +x "$bin_link"
 
-    # Verify installation
-    if [ -x "$bin_link" ] && [ -f "$script_dest" ]; then
-        log_success "Команда '$APP_NAME' установлена → $bin_link"
-    else
-        log_warning "Не удалось зарегистрировать команду. Запускайте вручную:"
-        echo -e "   ${CYAN}bash $script_dest${NC}"
+    # Verify
+    if [ "$installed" = true ] && [ -x "$bin_link" ]; then
+        log_success "Команда '$APP_NAME' зарегистрирована → $bin_link"
     fi
 }
 
@@ -954,3 +960,4 @@ case "$COMMAND" in
         exit 1
         ;;
 esac
+}  # ← End of buffer block for curl | bash
