@@ -11,10 +11,11 @@
 # ║                                                                ║
 # ║  Based on: telemt (github.com/telemt/telemt)                   ║
 # ╚════════════════════════════════════════════════════════════════╝
-# VERSION=3.0.0
+# VERSION=3.1.0
 
-SCRIPT_VERSION="3.0.0"
+SCRIPT_VERSION="3.1.0"
 APP_NAME="mtproxy"
+SCRIPT_URL="https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/caddy-mtproxy.sh"
 
 set -euo pipefail
 
@@ -425,11 +426,29 @@ install_command() {
         fi
     fi
 
-    # ── Step 5: Generate secret ──
-    log_info "Генерируем секрет..."
+    # ── Step 5: Secret ──
+    echo ""
+    echo -e "${WHITE}─── Шаг 5: Секрет (необязательно) ───${NC}"
+    echo -e "${GRAY}Можете ввести свой 32-символьный HEX секрет или оставить пустым${NC}"
+    echo -e "${GRAY}для автоматической генерации.${NC}"
+    echo ""
+    read -p "Секрет (Enter = сгенерировать): " user_secret
+    user_secret=$(echo "$user_secret" | xargs)
+
     local secret
-    secret=$(generate_secret)
-    log_success "Секрет сгенерирован"
+    if [ -n "$user_secret" ]; then
+        if [[ ! "$user_secret" =~ ^[0-9a-fA-F]{32}$ ]]; then
+            log_error "Секрет должен быть ровно 32 HEX символа (0-9, a-f)"
+            log_info "Генерируем случайный секрет..."
+            secret=$(generate_secret)
+        else
+            secret="$user_secret"
+            log_success "Используем указанный секрет"
+        fi
+    else
+        secret=$(generate_secret)
+        log_success "Секрет сгенерирован"
+    fi
 
     # ── Summary ──
     echo ""
@@ -514,20 +533,50 @@ install_command() {
 # Management Command Installation
 # ============================================
 install_management_command() {
-    # Copy script to install dir
-    cp "$(readlink -f "$0")" "$INSTALL_DIR/$APP_NAME.sh" 2>/dev/null || \
-    cp "$0" "$INSTALL_DIR/$APP_NAME.sh" 2>/dev/null || true
+    local script_dest="$INSTALL_DIR/$APP_NAME.sh"
+    local bin_link="/usr/local/bin/$APP_NAME"
 
-    # Create wrapper
-    cat > /usr/local/bin/"$APP_NAME" << EOF
+    # Determine source: $0 may be /dev/stdin or a pipe when run via curl | bash
+    local script_source
+    script_source=$(readlink -f "$0" 2>/dev/null || echo "$0")
+
+    if [ -f "$script_source" ] && [ "$script_source" != "/dev/stdin" ] && \
+       [ "$script_source" != "/proc/self/fd/0" ] && [ "$script_source" != "-bash" ]; then
+        # Script was run from a file — copy it
+        cp "$script_source" "$script_dest"
+    elif [ -f "$script_dest" ]; then
+        # Already installed, keep existing
+        log_info "Скрипт уже на месте: $script_dest"
+    else
+        # Piped via curl | bash — download the script
+        log_info "Скачиваем скрипт в $script_dest..."
+        if [ -n "${SCRIPT_URL:-}" ] && [ "$SCRIPT_URL" != "https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/caddy-mtproxy.sh" ]; then
+            curl -fsSL "$SCRIPT_URL" -o "$script_dest"
+        else
+            # Fallback: re-read from stdin is not possible, embed self
+            log_warning "Не удалось определить источник скрипта."
+            log_warning "Скопируйте скрипт вручную в $script_dest"
+            log_warning "Затем выполните: chmod +x $script_dest"
+        fi
+    fi
+
+    chmod +x "$script_dest" 2>/dev/null || true
+
+    # Create /usr/local/bin wrapper (always overwrite to fix broken installs)
+    cat > "$bin_link" << 'BINEOF'
 #!/usr/bin/env bash
-exec bash "$INSTALL_DIR/$APP_NAME.sh" "\$@"
-EOF
+exec bash "/opt/mtproxy/mtproxy.sh" "$@"
+BINEOF
 
-    chmod +x /usr/local/bin/"$APP_NAME"
-    chmod +x "$INSTALL_DIR/$APP_NAME.sh" 2>/dev/null || true
+    chmod +x "$bin_link"
 
-    log_success "Команда '$APP_NAME' установлена в /usr/local/bin/"
+    # Verify installation
+    if [ -x "$bin_link" ] && [ -f "$script_dest" ]; then
+        log_success "Команда '$APP_NAME' установлена → $bin_link"
+    else
+        log_warning "Не удалось зарегистрировать команду. Запускайте вручную:"
+        echo -e "   ${CYAN}bash $script_dest${NC}"
+    fi
 }
 
 # ============================================
