@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
 # ╔════════════════════════════════════════════════════════════════╗
-# ║  MTProxy Installer (telemt + Fake TLS)                         ║
+# ║  Caddy + MTProxy Installer                                    ║
+# ║  Caddy (HTTPS site on 443) + MTProxy (Fake TLS)               ║
 # ║                                                                ║
-# ║  Architecture:                                                 ║
-# ║    telemt on port 443 — MTProto proxy with TLS masking         ║
-# ║    mask=true — non-MTProto traffic proxied to tls_domain       ║
-# ║                                                                ║
-# ║  Telegram → :443 → telemt (MTProto) → Telegram servers         ║
-# ║  Browser  → :443 → telemt (not MTProto) → tls_domain site      ║
-# ║                                                                ║
-# ║  Based on: telemt (github.com/telemt/telemt)                   ║
+# ║  Based on: selfsteal.sh by DigneZzZ & mtproxy.sh              ║
 # ╚════════════════════════════════════════════════════════════════╝
-# VERSION=3.2.0
+# VERSION=1.0.0
 
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="1.0.0"
 APP_NAME="mtproxy"
-SCRIPT_URL="https://raw.githubusercontent.com/ildar58/vpn-tools/main/caddy-mtproxy.sh"
 
 set -euo pipefail
-{  # ← Buffer entire script for curl | bash safety
 
 # ============================================
 # Colors
@@ -35,12 +27,44 @@ readonly NC='\033[0m'
 # ============================================
 # Configuration
 # ============================================
-INSTALL_DIR="/opt/mtproxy"
-LOG_FILE="/var/log/mtproxy-installer.log"
+INSTALL_DIR="/opt/caddy-mtproxy"
+HTML_DIR="$INSTALL_DIR/html"
+LOG_FILE="/var/log/caddy-mtproxy.log"
 
-TELEMT_CONTAINER="telemt"
-TELEMT_IMAGE="ghcr.io/telemt/telemt:latest"
-API_PORT="9091"
+CADDY_CONTAINER="caddy-site"
+MTPROXY_CONTAINER="mtproto-proxy"
+CADDY_VERSION="2.10.2"
+
+DEFAULT_MTPROXY_PORT=8443
+
+# Template Registry (from selfsteal.sh)
+declare -A TEMPLATE_FOLDERS=(
+    ["1"]="10gag"
+    ["2"]="convertit"
+    ["3"]="converter"
+    ["4"]="downloader"
+    ["5"]="filecloud"
+    ["6"]="games-site"
+    ["7"]="modmanager"
+    ["8"]="speedtest"
+    ["9"]="YouTube"
+    ["10"]="503-1"
+    ["11"]="503-2"
+)
+
+declare -A TEMPLATE_NAMES=(
+    ["1"]="😂 10gag - Сайт мемов"
+    ["2"]="📁 Convertit - Конвертер файлов"
+    ["3"]="🎬 Converter - Видеостудия-конвертер"
+    ["4"]="⬇️ Downloader - Даунлоадер"
+    ["5"]="☁️ FileCloud - Облачное хранилище"
+    ["6"]="🎮 Games-site - Ретро игровой портал"
+    ["7"]="🛠️ ModManager - Мод-менеджер для игр"
+    ["8"]="🚀 SpeedTest - Спидтест"
+    ["9"]="📺 YouTube - Видеохостинг с капчей"
+    ["10"]="⚠️ 503 Error - Страница ошибки v1"
+    ["11"]="⚠️ 503 Error - Страница ошибки v2"
+)
 
 # ============================================
 # Logging
@@ -69,850 +93,1136 @@ get_server_ip() {
     echo "${ip:-127.0.0.1}"
 }
 
-check_port_available() {
-    local port="$1"
-    if ss -tlnp 2>/dev/null | grep -q ":${port} " || \
-       netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
-        return 1
+create_dir_safe() {
+    local dir="$1"
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir" || { log_error "Не удалось создать директорию: $dir"; return 1; }
     fi
     return 0
 }
 
-command_exists() {
-    command -v "$1" &>/dev/null
-}
-
 # ============================================
-# Docker Installation
+# Docker check/install
 # ============================================
-install_docker() {
-    if command_exists docker; then
-        log_success "Docker уже установлен: $(docker --version)"
+ensure_docker() {
+    if command -v docker &>/dev/null; then
         return 0
     fi
 
-    log_info "Установка Docker..."
-    curl -fsSL https://get.docker.com | bash
-    systemctl enable docker
-    systemctl start docker
-    log_success "Docker установлен: $(docker --version)"
-}
-
-install_docker_compose() {
-    if docker compose version &>/dev/null 2>&1; then
-        log_success "Docker Compose уже установлен"
-        return 0
-    fi
-
-    log_info "Установка Docker Compose plugin..."
-    apt-get update -qq
-    apt-get install -y -qq docker-compose-plugin 2>/dev/null || {
-        local compose_url="https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)"
-        curl -fsSL "$compose_url" -o /usr/local/bin/docker-compose
-        chmod +x /usr/local/bin/docker-compose
-    }
-    log_success "Docker Compose установлен"
-}
-
-# ============================================
-# Secret Generation
-# ============================================
-generate_secret() {
-    openssl rand -hex 16
-}
-
-# ============================================
-# Config Generation
-# ============================================
-create_config_toml() {
-    local tls_domain="$1"
-    local secret="$2"
-    local tag="${3:-}"
-    local port="${4:-443}"
-
-    local tag_line=""
-    if [ -n "$tag" ]; then
-        tag_line="ad_tag = \"$tag\""
+    log_info "Docker не найден, устанавливаю..."
+    if curl -fsSL https://get.docker.com | sh >/dev/null 2>&1; then
+        systemctl start docker 2>/dev/null || true
+        systemctl enable docker 2>/dev/null || true
+        log_success "Docker установлен"
     else
-        tag_line="# ad_tag = \"\""
+        log_error "Не удалось установить Docker"
+        echo -e "${GRAY}Установите вручную: curl -fsSL https://get.docker.com | sh${NC}"
+        return 1
     fi
-
-    cat > "$INSTALL_DIR/config.toml" << TOMLEOF
-# ============================================
-# telemt MTProxy Configuration
-# Generated by $APP_NAME installer v$SCRIPT_VERSION
-# ============================================
-
-[general]
-use_middle_proxy = true
-log_level = "normal"
-$tag_line
-
-[general.modes]
-classic = false
-secure = false
-tls = true
-
-[general.links]
-show = "*"
-
-[server]
-port = $port
-
-[server.api]
-enabled = true
-listen = "0.0.0.0:$API_PORT"
-whitelist = ["0.0.0.0/0"]
-
-[[server.listeners]]
-ip = "0.0.0.0"
-
-[censorship]
-tls_domain = "$tls_domain"
-mask = true
-tls_emulation = true
-unknown_sni_action = "mask"
-
-[access.users]
-user = "$secret"
-TOMLEOF
-
-    log_success "config.toml создан"
 }
 
-create_docker_compose() {
-    local port="${1:-443}"
-
-    cat > "$INSTALL_DIR/docker-compose.yml" << DCEOF
-services:
-  telemt:
-    image: ghcr.io/telemt/telemt:latest
-    container_name: telemt
-    restart: unless-stopped
-    ports:
-      - "${port}:443"
-      - "127.0.0.1:9091:9091"
-    working_dir: /run/telemt
-    volumes:
-      - ./config.toml:/run/telemt/config.toml:ro
-    tmpfs:
-      - /run/telemt:rw,mode=1777,size=1m
-    environment:
-      - RUST_LOG=info
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
-DCEOF
-
-    log_success "docker-compose.yml создан"
-}
-
-# ============================================
-# Save/Load Configuration
-# ============================================
-save_config() {
-    local domain="$1"
-    local secret="$2"
-    local server_ip="$3"
-    local tag="${4:-}"
-    local tls_domain="${5:-}"
-    local port="${6:-443}"
-
-    cat > "$INSTALL_DIR/.env" << EOF
-DOMAIN=$domain
-SECRET=$secret
-SERVER_IP=$server_ip
-TAG=$tag
-TLS_DOMAIN=$tls_domain
-PORT=$port
-INSTALLED_AT=$(date '+%Y-%m-%d %H:%M:%S')
-VERSION=$SCRIPT_VERSION
-EOF
-    chmod 600 "$INSTALL_DIR/.env"
-}
-
-load_config() {
-    if [ -f "$INSTALL_DIR/.env" ]; then
-        source "$INSTALL_DIR/.env"
+ensure_docker_compose() {
+    if docker compose version &>/dev/null; then
         return 0
     fi
+    log_error "Docker Compose V2 не доступен"
     return 1
 }
 
 # ============================================
-# Firewall
+# DNS validation
 # ============================================
-setup_firewall() {
-    local port="$1"
+validate_dns() {
+    local domain="$1"
+    local server_ip="$2"
 
-    if ! command_exists ufw; then
-        log_info "UFW не найден, пропускаем настройку фаервола"
+    echo -e "${WHITE}🔍 Проверка DNS для ${CYAN}$domain${NC}"
+    echo
+
+    # Install dig if missing
+    if ! command -v dig &>/dev/null; then
+        log_info "Устанавливаю dig..."
+        apt-get update -qq &>/dev/null && apt-get install -y -qq dnsutils &>/dev/null || true
+    fi
+
+    if ! command -v dig &>/dev/null; then
+        log_warning "dig недоступен, пропускаю проверку DNS"
         return 0
     fi
 
-    log_info "Открываем порт $port в UFW..."
-    ufw allow "$port"/tcp comment "MTProxy telemt" 2>/dev/null || true
-    log_success "Порт $port открыт в UFW"
+    local a_record
+    a_record=$(dig +short A "$domain" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+
+    if [ -z "$a_record" ]; then
+        log_warning "A-запись не найдена для $domain"
+        echo -e "${GRAY}   Убедитесь, что домен настроен на IP: $server_ip${NC}"
+        echo
+        read -p "Продолжить без DNS? [y/N]: " -r
+        [[ $REPLY =~ ^[Yy]$ ]] && return 0 || return 1
+    fi
+
+    if [ "$a_record" = "$server_ip" ]; then
+        log_success "DNS: $domain → $a_record (совпадает с сервером)"
+        return 0
+    else
+        log_warning "DNS: $domain → $a_record (ожидалось: $server_ip)"
+        echo
+        read -p "IP не совпадает. Продолжить? [y/N]: " -r
+        [[ $REPLY =~ ^[Yy]$ ]] && return 0 || return 1
+    fi
 }
 
 # ============================================
-# Link Generation
+# MTProxy secret generation
 # ============================================
-get_links_from_api() {
-    local response
-    response=$(curl -s --connect-timeout 3 "http://127.0.0.1:$API_PORT/v1/users" 2>/dev/null) || {
-        return 1
-    }
-    echo "$response"
+generate_mtproxy_secret() {
+    local domain="$1"
+
+    # Ensure xxd is available
+    if ! command -v xxd &>/dev/null; then
+        apt-get install -y -qq xxd 2>/dev/null || apt-get install -y -qq vim-common 2>/dev/null || true
+    fi
+
+    local domain_hex
+    domain_hex=$(echo -n "$domain" | xxd -ps | tr -d '\n')
+
+    # Pad with random hex to 30 chars total
+    local domain_len=${#domain_hex}
+    local needed=$((30 - domain_len))
+
+    if [ "$needed" -gt 0 ]; then
+        local random_hex
+        random_hex=$(openssl rand -hex 15 | cut -c1-"$needed")
+        echo "ee${domain_hex}${random_hex}"
+    else
+        # Domain hex is already >= 30 chars, truncate
+        echo "ee${domain_hex:0:30}"
+    fi
 }
 
-show_links() {
-    if ! load_config; then
-        log_error "Конфигурация не найдена. Сначала установите MTProxy."
+# ============================================
+# Template downloading (from selfsteal.sh)
+# ============================================
+download_template() {
+    local template_type="$1"
+    local template_folder="${TEMPLATE_FOLDERS[$template_type]:-}"
+    local template_name="${TEMPLATE_NAMES[$template_type]:-}"
+
+    if [ -z "$template_folder" ]; then
+        log_error "Неизвестный шаблон: $template_type"
         return 1
     fi
 
-    local port="${PORT:-443}"
-    local client_secret=""
+    echo -e "${WHITE}🎨 Загрузка шаблона: $template_name${NC}"
+    echo
 
-    # Extract correct secret from API (telemt generates it properly)
-    local api_response
-    if api_response=$(get_links_from_api) && [ -n "$api_response" ] && [ "$api_response" != "null" ]; then
-        if command_exists jq; then
-            # Get first TLS link from API and extract the secret
-            local api_link
-            api_link=$(echo "$api_response" | jq -r '.data[0].links.tls[0] // empty' 2>/dev/null)
-            if [ -n "$api_link" ]; then
-                # Extract secret parameter from the tg:// link
-                client_secret=$(echo "$api_link" | grep -oP 'secret=\K[0-9a-fA-F]+' 2>/dev/null || \
-                                echo "$api_link" | sed -n 's/.*secret=\([0-9a-fA-F]*\).*/\1/p')
+    create_dir_safe "$HTML_DIR" || return 1
+    rm -rf "${HTML_DIR:?}"/* 2>/dev/null || true
+    cd "$HTML_DIR" || return 1
+
+    # Method 1: git sparse-checkout
+    if command -v git &>/dev/null; then
+        local temp_dir="/tmp/caddy-mtproxy-tpl-$$"
+        if git clone --filter=blob:none --sparse "https://github.com/DigneZzZ/remnawave-scripts.git" "$temp_dir" 2>/dev/null; then
+            cd "$temp_dir"
+            git sparse-checkout set "sni-templates/$template_folder" 2>/dev/null
+            local src="$temp_dir/sni-templates/$template_folder"
+            if [ -d "$src" ] && cp -r "$src"/* "$HTML_DIR/" 2>/dev/null; then
+                local count
+                count=$(find "$HTML_DIR" -type f | wc -l)
+                log_success "Шаблон загружен ($count файлов)"
+                rm -rf "$temp_dir"
+                cd "$HTML_DIR"
+                chmod -R 644 "$HTML_DIR"/* 2>/dev/null || true
+                find "$HTML_DIR" -type d -exec chmod 755 {} \; 2>/dev/null || true
+                return 0
             fi
+            rm -rf "$temp_dir"
+            cd "$HTML_DIR"
         fi
     fi
 
-    # Fallback: build secret manually if API didn't return it
-    if [ -z "$client_secret" ]; then
-        local tls_hex
-        tls_hex=$(echo -n "${TLS_DOMAIN}" | xxd -p | tr -d '\n')
-        client_secret="ee${SECRET}${tls_hex}"
-        log_warning "API недоступен, секрет сгенерирован вручную"
+    # Method 2: GitHub API + curl
+    local api_url="https://api.github.com/repos/DigneZzZ/remnawave-scripts/git/trees/main?recursive=1"
+    local tree_data
+    tree_data=$(curl -s "$api_url" 2>/dev/null)
+
+    if echo "$tree_data" | grep -q '"path"'; then
+        local files
+        files=$(echo "$tree_data" | grep -o '"path":[^,]*' | sed 's/"path":"//' | sed 's/"//' | grep "^sni-templates/$template_folder/")
+        local count=0
+
+        while IFS= read -r fpath; do
+            [ -z "$fpath" ] && continue
+            local rel="${fpath#sni-templates/$template_folder/}"
+            local url="https://raw.githubusercontent.com/DigneZzZ/remnawave-scripts/main/$fpath"
+            local dir
+            dir=$(dirname "$rel")
+            [ "$dir" != "." ] && mkdir -p "$dir"
+            if curl -fsSL "$url" -o "$rel" 2>/dev/null; then
+                ((count++))
+            fi
+        done <<< "$files"
+
+        if [ "$count" -gt 0 ]; then
+            log_success "Шаблон загружен ($count файлов)"
+            chmod -R 644 "$HTML_DIR"/* 2>/dev/null || true
+            find "$HTML_DIR" -type d -exec chmod 755 {} \; 2>/dev/null || true
+            return 0
+        fi
     fi
 
-    echo ""
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}  🔗 Ссылки для подключения к MTProxy${NC}"
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-    echo ""
+    # Method 3: Fallback HTML
+    log_warning "Не удалось загрузить шаблон, создаю заглушку"
+    create_fallback_html "$template_name"
+    return 0
+}
 
-    if [ -n "${DOMAIN:-}" ] && [ "${DOMAIN}" != "${SERVER_IP:-}" ]; then
-        echo -e "${GREEN}📌 По домену (рекомендуется):${NC}"
-        echo ""
-        echo -e "   ${WHITE}tg://proxy?server=${DOMAIN}&port=${port}&secret=${client_secret}${NC}"
-        echo ""
-        echo -e "   ${WHITE}https://t.me/proxy?server=${DOMAIN}&port=${port}&secret=${client_secret}${NC}"
-        echo ""
-    fi
-
-    echo -e "${YELLOW}📌 По IP:${NC}"
-    echo ""
-    echo -e "   ${WHITE}tg://proxy?server=${SERVER_IP}&port=${port}&secret=${client_secret}${NC}"
-    echo ""
-    echo -e "   ${WHITE}https://t.me/proxy?server=${SERVER_IP}&port=${port}&secret=${client_secret}${NC}"
-    echo ""
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+create_fallback_html() {
+    local name="${1:-Service}"
+    cat > "$HTML_DIR/index.html" << EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>$name</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; display: flex; align-items: center; justify-content: center; color: white;
+        }
+        .container { text-align: center; max-width: 600px; padding: 2rem; }
+        h1 { font-size: 3rem; margin-bottom: 1rem; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        p { font-size: 1.2rem; opacity: 0.9; margin-bottom: 2rem; }
+        .status { background: rgba(255,255,255,0.1); padding: 1rem 2rem; border-radius: 10px; backdrop-filter: blur(10px); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Service Ready</h1>
+        <p>$name is now active</p>
+        <div class="status"><p>System Online</p></div>
+    </div>
+</body>
+</html>
+EOF
 }
 
 # ============================================
-# Install Command
+# Caddyfile generation
+# ============================================
+create_caddyfile() {
+    local domain="$1"
+
+    cat > "$INSTALL_DIR/Caddyfile" << EOF
+{
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 10MB
+            roll_keep 5
+            roll_keep_for 720h
+        }
+        level ERROR
+        format json
+    }
+}
+
+${domain} {
+    root * /var/www/html
+    file_server
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        X-XSS-Protection "1; mode=block"
+        -Server
+    }
+
+    @static {
+        path *.css *.js *.png *.jpg *.jpeg *.gif *.ico *.svg *.woff *.woff2 *.ttf *.eot
+    }
+    header @static Cache-Control "public, max-age=2592000, immutable"
+
+    try_files {path} /index.html
+
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 10MB
+            roll_keep 5
+        }
+        level ERROR
+    }
+}
+EOF
+    log_success "Caddyfile создан"
+}
+
+# ============================================
+# Docker Compose generation
+# ============================================
+create_docker_compose() {
+    local domain="$1"
+    local mtproxy_port="$2"
+    local secret="$3"
+    local tag="${4:-}"
+
+    local tag_env=""
+    if [ -n "$tag" ]; then
+        tag_env="      TAG: \"$tag\""
+    fi
+
+    cat > "$INSTALL_DIR/docker-compose.yml" << EOF
+services:
+  caddy:
+    image: caddy:${CADDY_VERSION}
+    container_name: ${CADDY_CONTAINER}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${HTML_DIR}:/var/www/html:ro
+      - ./logs/caddy:/var/log/caddy
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mtproto-proxy:
+    image: telegrammessenger/proxy:latest
+    container_name: ${MTPROXY_CONTAINER}
+    restart: unless-stopped
+    ports:
+      - "${mtproxy_port}:443"
+    environment:
+      SECRET: "${secret}"
+${tag_env}
+    volumes:
+      - mtproxy_config:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  mtproxy_config:
+EOF
+    log_success "docker-compose.yml создан"
+}
+
+# ============================================
+# .env / info file
+# ============================================
+save_config() {
+    local domain="$1"
+    local mtproxy_port="$2"
+    local secret="$3"
+    local server_ip="$4"
+    local tag="${5:-}"
+
+    cat > "$INSTALL_DIR/.env" << EOF
+DOMAIN=$domain
+MTPROXY_PORT=$mtproxy_port
+SECRET=$secret
+SERVER_IP=$server_ip
+TAG=$tag
+INSTALLED=$(date '+%Y-%m-%d %H:%M:%S')
+EOF
+
+    local proxy_link_ip="tg://proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local proxy_link_domain="tg://proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
+    local web_link_ip="https://t.me/proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local web_link_domain="https://t.me/proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
+
+    cat > "$INSTALL_DIR/info.txt" << EOF
+═══════════════════════════════════════════
+  Caddy + MTProxy Configuration
+═══════════════════════════════════════════
+
+🌐 Сайт:     https://${domain}
+🔌 MTProxy:   ${server_ip}:${mtproxy_port} (${domain}:${mtproxy_port})
+🔑 Секрет:    ${secret}
+🏷️  TAG:       ${tag:-не задан}
+
+📱 Ссылка для Telegram (по домену — рекомендуется):
+   ${proxy_link_domain}
+
+📱 Ссылка для Telegram (по IP):
+   ${proxy_link_ip}
+
+🌐 Web ссылка (по домену):
+   ${web_link_domain}
+
+🌐 Web ссылка (по IP):
+   ${web_link_ip}
+
+📅 Установлено: $(date)
+═══════════════════════════════════════════
+EOF
+}
+
+# ============================================
+# INSTALL
 # ============================================
 install_command() {
     check_root
+    clear
 
-    echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║${NC}  ${WHITE}MTProxy Installer v${SCRIPT_VERSION}${NC}                        ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  ${GRAY}telemt • Fake TLS • Docker${NC}                       ${CYAN}║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    echo -e "${WHITE}🚀 Установка Caddy + MTProxy${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 50))${NC}"
+    echo -e "${CYAN}Caddy (HTTPS сайт на 443) + MTProxy (Fake TLS)${NC}"
+    echo
 
-    # Check if already installed
-    if [ -f "$INSTALL_DIR/.env" ]; then
-        log_warning "MTProxy уже установлен в $INSTALL_DIR"
-        read -p "Переустановить? (y/N): " reinstall
-        if [[ ! "$reinstall" =~ ^[Yy]$ ]]; then
-            log_info "Отмена"
-            return 0
-        fi
-        cd "$INSTALL_DIR" && docker compose down 2>/dev/null || true
+    # Check existing installation
+    if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+        log_warning "Обнаружена существующая установка!"
+        echo
+        echo -e "${WHITE}Варианты:${NC}"
+        echo -e "   ${WHITE}1)${NC} ${GRAY}Переустановить${NC}"
+        echo -e "   ${WHITE}2)${NC} ${GRAY}Отмена${NC}"
+        echo
+        read -p "Выберите [1-2]: " choice
+        case "$choice" in
+            1)
+                log_info "Останавливаю старые сервисы..."
+                cd "$INSTALL_DIR" && docker compose down 2>/dev/null || true
+                ;;
+            *)
+                echo -e "${GRAY}Отменено${NC}"
+                return 0
+                ;;
+        esac
+        echo
     fi
 
-    # ── Step 1: Domain ──
-    echo ""
-    echo -e "${WHITE}─── Шаг 1: Домен сервера ───${NC}"
-    echo -e "${GRAY}Домен, который указывает на этот сервер (для ссылок).${NC}"
-    echo -e "${GRAY}Оставьте пустым, чтобы использовать только IP.${NC}"
-    echo ""
-    read -p "Домен (например, mt.example.com): " user_domain
-    user_domain=$(echo "$user_domain" | xargs)
+    # Check requirements
+    echo -e "${WHITE}🔍 Проверка системы${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    ensure_docker || return 1
+    ensure_docker_compose || return 1
+    echo -e "${GREEN}✅ Docker и Compose доступны${NC}"
+    echo
 
     # Get server IP
     local server_ip
     server_ip=$(get_server_ip)
-    log_info "IP сервера: $server_ip"
+    echo -e "${WHITE}🖥️  IP сервера: ${CYAN}$server_ip${NC}"
+    echo
 
-    # Validate domain DNS if provided
-    if [ -n "$user_domain" ]; then
-        log_info "Проверяем DNS для $user_domain..."
-        local dns_ip
-        dns_ip=$(dig +short "$user_domain" A 2>/dev/null | head -1)
-        if [ -n "$dns_ip" ]; then
-            if [ "$dns_ip" = "$server_ip" ]; then
-                log_success "DNS ✓ ($user_domain → $server_ip)"
-            else
-                log_warning "DNS указывает на $dns_ip, а IP сервера: $server_ip"
-                read -p "Продолжить? (y/N): " cont
-                [[ "$cont" =~ ^[Yy]$ ]] || { log_info "Отмена"; return 1; }
-            fi
-        else
-            log_warning "Не удалось разрешить DNS для $user_domain"
-            read -p "Продолжить? (y/N): " cont
-            [[ "$cont" =~ ^[Yy]$ ]] || { log_info "Отмена"; return 1; }
+    # Domain input
+    echo -e "${WHITE}🌐 Настройка домена${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    echo -e "${GRAY}Caddy автоматически получит SSL-сертификат Let's Encrypt${NC}"
+    echo -e "${GRAY}MTProxy Fake TLS будет имитировать этот же домен${NC}"
+    echo
+
+    local domain=""
+    while [ -z "$domain" ]; do
+        read -p "Введите домен (напр. mt.example.com): " domain
+        if [ -z "$domain" ]; then
+            log_error "Домен не может быть пустым"
+            continue
         fi
+        # Basic format check
+        if ! [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+            log_error "Неверный формат домена"
+            domain=""
+            continue
+        fi
+    done
+
+    echo
+    validate_dns "$domain" "$server_ip" || return 1
+    echo
+
+    # MTProxy port
+    echo -e "${WHITE}🔌 Настройка MTProxy${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    echo -e "${GRAY}Порт 443 занят Caddy. MTProxy будет на отдельном порту.${NC}"
+    echo
+
+    local mtproxy_port
+    read -p "Порт для MTProxy (по умолчанию: $DEFAULT_MTPROXY_PORT): " mtproxy_port
+    mtproxy_port=${mtproxy_port:-$DEFAULT_MTPROXY_PORT}
+
+    if ! [[ "$mtproxy_port" =~ ^[0-9]+$ ]] || [ "$mtproxy_port" -lt 1 ] || [ "$mtproxy_port" -gt 65535 ]; then
+        log_error "Неверный номер порта"
+        return 1
     fi
 
-    # ── Step 2: TLS Domain ──
-    echo ""
-    echo -e "${WHITE}─── Шаг 2: TLS домен для маскировки ───${NC}"
-    echo -e "${GRAY}Домен, под который будет маскироваться трафик прокси.${NC}"
-    echo -e "${GRAY}При обращении браузером на :443 будет показан этот сайт.${NC}"
-    echo -e "${GRAY}Рекомендуется: крупный популярный сайт (google.com, microsoft.com и т.д.)${NC}"
-    echo ""
-    read -p "TLS домен [google.com]: " user_tls_domain
-    user_tls_domain=$(echo "${user_tls_domain:-google.com}" | xargs)
-
-    # ── Step 3: Port ──
-    echo ""
-    echo -e "${WHITE}─── Шаг 3: Порт ───${NC}"
-    echo ""
-    read -p "Порт MTProxy [443]: " user_port
-    user_port="${user_port:-443}"
-
-    if [ "$user_port" != "443" ] && ! check_port_available "$user_port"; then
-        log_warning "Порт $user_port уже занят!"
-        read -p "Продолжить? (y/N): " cont
-        [[ "$cont" =~ ^[Yy]$ ]] || { log_info "Отмена"; return 1; }
+    if [ "$mtproxy_port" = "443" ] || [ "$mtproxy_port" = "80" ]; then
+        log_error "Порты 80 и 443 заняты Caddy!"
+        return 1
     fi
 
-    # ── Step 4: TAG ──
-    echo ""
-    echo -e "${WHITE}─── Шаг 4: Промо TAG (необязательно) ───${NC}"
-    echo -e "${GRAY}Получите TAG у @MTProxybot в Telegram для продвижения канала.${NC}"
-    echo -e "${GRAY}⚠️  Ссылка от бота НЕ будет работать — используйте только TAG.${NC}"
-    echo -e "${GRAY}Можно добавить позже: $APP_NAME update-tag${NC}"
-    echo ""
+    # Check port availability
+    if ss -tuln | grep -q ":${mtproxy_port} "; then
+        log_warning "Порт $mtproxy_port уже занят!"
+        read -p "Продолжить? [y/N]: " -r
+        [[ ! $REPLY =~ ^[Yy]$ ]] && return 1
+    fi
+
+    # Generate MTProxy secret
+    echo
+    log_info "Генерация Fake TLS секрета для домена $domain..."
+    local secret
+    secret=$(generate_mtproxy_secret "$domain")
+    echo -e "${WHITE}   Секрет: ${YELLOW}$secret${NC}"
+    echo -e "${GRAY}   (Fake TLS имитирует подключение к $domain)${NC}"
+
+    # TAG (optional)
+    echo
+    echo -e "${WHITE}🏷️  TAG от @MTProxybot (опционально)${NC}"
+    echo -e "${GRAY}Для продвижения канала. Можно добавить позже.${NC}"
+    echo
     read -p "Введите TAG (оставьте пустым для пропуска): " user_tag
 
     if [ -n "$user_tag" ]; then
         if [[ ! "$user_tag" =~ ^[0-9a-fA-F]{32}$ ]]; then
-            log_warning "TAG должен быть 32-символьной HEX строкой. Пропускаем."
+            log_warning "Неверный формат TAG (ожидается 32 hex символа). Пропускаю."
             user_tag=""
         fi
     fi
 
-    # ── Step 5: Secret ──
-    echo ""
-    echo -e "${WHITE}─── Шаг 5: Секрет (необязательно) ───${NC}"
-    echo -e "${GRAY}Можете ввести свой 32-символьный HEX секрет или оставить пустым${NC}"
-    echo -e "${GRAY}для автоматической генерации.${NC}"
-    echo ""
-    read -p "Секрет (Enter = сгенерировать): " user_secret
-    user_secret=$(echo "$user_secret" | xargs)
-
-    local secret
-    if [ -n "$user_secret" ]; then
-        if [[ ! "$user_secret" =~ ^[0-9a-fA-F]{32}$ ]]; then
-            log_error "Секрет должен быть ровно 32 HEX символа (0-9, a-f)"
-            log_info "Генерируем случайный секрет..."
-            secret=$(generate_secret)
-        else
-            secret="$user_secret"
-            log_success "Используем указанный секрет"
-        fi
-    else
-        secret=$(generate_secret)
-        log_success "Секрет сгенерирован"
-    fi
-
-    # ── Summary ──
-    echo ""
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}  📋 Параметры установки:${NC}"
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Домен:" "${user_domain:-не задан}"
-    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "IP:" "$server_ip"
-    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "TLS домен:" "$user_tls_domain"
-    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Порт:" "$user_port"
-    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Секрет:" "$secret"
-    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "TAG:" "${user_tag:-не задан}"
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    read -p "Начать установку? (Y/n): " confirm
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
-        log_info "Отмена"
-        return 0
-    fi
-
-    # ── Install dependencies ──
-    log_info "Установка зависимостей..."
-    apt-get update -qq
-    apt-get install -y -qq curl jq dnsutils xxd openssl 2>/dev/null || true
-
-    install_docker
-    install_docker_compose
-
-    # ── Create directory structure ──
-    mkdir -p "$INSTALL_DIR"
-
-    # ── Generate configs ──
-    create_config_toml "$user_tls_domain" "$secret" "$user_tag" "$user_port"
-    create_docker_compose "$user_port"
-    save_config "$user_domain" "$secret" "$server_ip" "$user_tag" "$user_tls_domain" "$user_port"
-
-    # ── Firewall ──
-    setup_firewall "$user_port"
-
-    # ── Pull and start ──
-    log_info "Скачиваем образ telemt..."
-    cd "$INSTALL_DIR"
-    docker compose pull
-
-    log_info "Запускаем MTProxy..."
-    docker compose up -d
-
-    # Wait for API
-    log_info "Ждём запуска API..."
-    local retries=0
-    while [ $retries -lt 10 ]; do
-        if curl -s --connect-timeout 1 "http://127.0.0.1:$API_PORT/v1/users" &>/dev/null; then
-            break
-        fi
-        sleep 1
-        retries=$((retries + 1))
+    # Template selection
+    echo
+    echo -e "${WHITE}🎨 Выбор шаблона сайта${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    echo
+    for i in $(seq 1 11); do
+        printf "   ${WHITE}%-3s${NC} ${CYAN}%s${NC}\n" "$i)" "${TEMPLATE_NAMES[$i]}"
     done
+    echo -e "   ${WHITE}r)${NC}  ${GRAY}🎲 Случайный${NC}"
+    echo
 
-    # ── Install management command ──
-    install_management_command
+    local template_choice
+    read -p "Выберите шаблон [1-11, r]: " template_choice
 
-    # ── Done ──
-    echo ""
-    echo -e "${GREEN}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║${NC}  ${WHITE}✅ MTProxy успешно установлен!${NC}                    ${GREEN}║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    local template_id
+    if [ "$template_choice" = "r" ] || [ "$template_choice" = "R" ]; then
+        template_id=$((RANDOM % 11 + 1))
+        echo -e "${CYAN}🎲 Случайный выбор: ${TEMPLATE_NAMES[$template_id]}${NC}"
+    elif [[ "$template_choice" =~ ^[1-9]$|^1[01]$ ]]; then
+        template_id="$template_choice"
+    else
+        template_id=$((RANDOM % 11 + 1))
+        echo -e "${CYAN}🎲 Случайный выбор: ${TEMPLATE_NAMES[$template_id]}${NC}"
+    fi
 
-    show_links
+    # Summary
+    echo
+    echo -e "${WHITE}📋 Итого${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Домен:" "$domain"
+    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Сайт (Caddy):" "https://$domain (порт 443)"
+    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "MTProxy порт:" "$mtproxy_port"
+    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Fake TLS домен:" "$domain"
+    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Шаблон:" "${TEMPLATE_NAMES[$template_id]}"
+    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "TAG:" "${user_tag:-не задан}"
+    printf "   ${WHITE}%-20s${NC} ${GRAY}%s${NC}\n" "Установка в:" "$INSTALL_DIR"
+    echo
 
-    echo ""
-    echo -e "${WHITE}Управление:${NC}"
-    echo -e "   ${CYAN}mtproxy${NC}          — интерактивное меню"
-    echo -e "   ${CYAN}mtproxy status${NC}   — статус контейнера"
-    echo -e "   ${CYAN}mtproxy links${NC}    — ссылки для подключения"
-    echo -e "   ${CYAN}mtproxy help${NC}     — все команды"
-    echo ""
+    read -p "Начать установку? [Y/n]: " -r
+    [[ $REPLY =~ ^[Nn]$ ]] && { echo -e "${GRAY}Отменено${NC}"; return 0; }
+
+    # Create directories
+    echo
+    echo -e "${WHITE}📁 Создание директорий${NC}"
+    create_dir_safe "$INSTALL_DIR" || return 1
+    create_dir_safe "$HTML_DIR" || return 1
+    create_dir_safe "$INSTALL_DIR/logs/caddy" || return 1
+    log_success "Директории созданы"
+
+    # Download template
+    echo
+    download_template "$template_id"
+
+    # Create configs
+    echo
+    echo -e "${WHITE}⚙️  Создание конфигурации${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    create_caddyfile "$domain"
+    create_docker_compose "$domain" "$mtproxy_port" "$secret" "$user_tag"
+    save_config "$domain" "$mtproxy_port" "$secret" "$server_ip" "$user_tag"
+
+    # Open firewall ports
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        log_info "Открываю порты в UFW..."
+        ufw allow 80/tcp 2>/dev/null || true
+        ufw allow 443/tcp 2>/dev/null || true
+        ufw allow "$mtproxy_port"/tcp 2>/dev/null || true
+        log_success "Порты 80, 443, $mtproxy_port открыты в UFW"
+    fi
+
+    # Start services
+    echo
+    echo -e "${WHITE}🚀 Запуск сервисов${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    cd "$INSTALL_DIR"
+
+    if docker compose up -d; then
+        log_success "Сервисы запущены!"
+    else
+        log_error "Ошибка запуска сервисов"
+        docker compose logs
+        return 1
+    fi
+
+    # Wait and verify
+    echo
+    log_info "Ожидание запуска контейнеров..."
+    sleep 5
+
+    local caddy_ok=false
+    local mtproxy_ok=false
+
+    if docker ps --format '{{.Names}}' | grep -q "$CADDY_CONTAINER"; then
+        caddy_ok=true
+    fi
+    if docker ps --format '{{.Names}}' | grep -q "$MTPROXY_CONTAINER"; then
+        mtproxy_ok=true
+    fi
+
+    echo
+
+    # Install management script
+    install_management_script
+
+    # Final output
+    local proxy_link_domain="tg://proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
+    local proxy_link_ip="tg://proxy?server=${server_ip}&port=${mtproxy_port}&secret=${secret}"
+    local web_link_domain="https://t.me/proxy?server=${domain}&port=${mtproxy_port}&secret=${secret}"
+
+    echo
+    echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
+    echo -e "${WHITE}  🎉 Установка завершена!${NC}"
+    echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
+    echo
+
+    if [ "$caddy_ok" = true ]; then
+        echo -e "  ${GREEN}✅ Caddy:${NC}    работает"
+    else
+        echo -e "  ${RED}❌ Caddy:${NC}    не запустился"
+    fi
+    if [ "$mtproxy_ok" = true ]; then
+        echo -e "  ${GREEN}✅ MTProxy:${NC}  работает"
+    else
+        echo -e "  ${RED}❌ MTProxy:${NC}  не запустился"
+    fi
+
+    echo
+    echo -e "  ${WHITE}🌐 Сайт:${NC}     https://$domain"
+    echo -e "  ${WHITE}🔌 MTProxy:${NC}   $domain:$mtproxy_port ($server_ip:$mtproxy_port)"
+    echo -e "  ${WHITE}🔑 Секрет:${NC}    $secret"
+    echo
+
+    echo -e "  ${WHITE}📱 Telegram ссылка (по домену — рекомендуется):${NC}"
+    echo -e "  ${GREEN}$proxy_link_domain${NC}"
+    echo
+    echo -e "  ${WHITE}📱 Telegram ссылка (по IP):${NC}"
+    echo -e "  ${GRAY}$proxy_link_ip${NC}"
+    echo
+    echo -e "  ${WHITE}🌐 Web ссылка:${NC}"
+    echo -e "  ${GREEN}$web_link_domain${NC}"
+    echo
+    echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
+    echo
+    echo -e "${WHITE}Управление:${NC} ${CYAN}$APP_NAME${NC} (интерактивное меню)"
+    echo -e "${WHITE}Конфигурация:${NC} ${GRAY}$INSTALL_DIR/info.txt${NC}"
+    echo
 }
 
 # ============================================
-# Management Command Installation
+# Management script installer
 # ============================================
-install_management_command() {
-    local script_dest="$INSTALL_DIR/$APP_NAME.sh"
-    local bin_link="/usr/local/bin/$APP_NAME"
-    local installed=false
+install_management_script() {
+    local target="/usr/local/bin/$APP_NAME"
 
-    # Try multiple sources to get the script into $script_dest
+    if [ -f "$0" ] && [ "$0" != "bash" ]; then
+        local src
+        src=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+        local tgt
+        tgt=$(realpath "$target" 2>/dev/null || echo "$target")
 
-    # 1) If running from a real file — copy it
-    local script_source="${BASH_SOURCE[0]:-$0}"
-    script_source=$(readlink -f "$script_source" 2>/dev/null || echo "$script_source")
-
-    if [ -f "$script_source" ] && \
-       [ "$script_source" != "/dev/stdin" ] && \
-       [ "$script_source" != "/proc/self/fd/0" ] && \
-       [[ "$script_source" != /dev/fd/* ]] && \
-       [ "$script_source" != "-bash" ] && \
-       [ "$script_source" != "bash" ]; then
-        cp "$script_source" "$script_dest"
-        installed=true
-        log_info "Скрипт скопирован из $script_source"
-    fi
-
-    # 2) If not copied and not already present — download from URL
-    if [ "$installed" = false ] && [ ! -s "$script_dest" ]; then
-        log_info "Скачиваем скрипт из репозитория..."
-        if curl -fsSL "$SCRIPT_URL" -o "$script_dest" 2>/dev/null; then
-            installed=true
-            log_success "Скрипт скачан"
-        else
-            log_error "Не удалось скачать скрипт из $SCRIPT_URL"
-            log_warning "Установите вручную:"
-            echo -e "   ${CYAN}curl -fsSL $SCRIPT_URL -o $script_dest && chmod +x $script_dest${NC}"
+        if [ "$src" = "$tgt" ]; then
+            return 0
         fi
-    elif [ -s "$script_dest" ]; then
-        installed=true
-    fi
 
-    chmod +x "$script_dest" 2>/dev/null || true
-
-    # Create /usr/local/bin/mtproxy wrapper (always overwrite)
-    cat > "$bin_link" << 'BINEOF'
-#!/usr/bin/env bash
-exec bash "/opt/mtproxy/mtproxy.sh" "$@"
-BINEOF
-    chmod +x "$bin_link"
-
-    # Verify
-    if [ "$installed" = true ] && [ -x "$bin_link" ]; then
-        log_success "Команда '$APP_NAME' зарегистрирована → $bin_link"
+        if [ -f "$src" ]; then
+            cp "$src" "$target" 2>/dev/null || true
+            chmod +x "$target" 2>/dev/null || true
+            log_success "Утилита управления: $target"
+        fi
     fi
 }
 
 # ============================================
-# Service Commands
+# UP / DOWN / RESTART
 # ============================================
 up_command() {
     check_root
     if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        log_error "MTProxy не установлен. Запустите: $APP_NAME install"
-        exit 1
+        log_error "Не установлено. Сначала запустите: $APP_NAME install"
+        return 1
     fi
-    log_info "Запускаем MTProxy..."
+    log_info "Запуск сервисов..."
     cd "$INSTALL_DIR" && docker compose up -d
-    log_success "MTProxy запущен"
+    log_success "Сервисы запущены"
 }
 
 down_command() {
     check_root
     if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        log_error "MTProxy не установлен."
-        exit 1
+        log_warning "Не установлено"
+        return 0
     fi
-    log_info "Останавливаем MTProxy..."
+    log_info "Остановка сервисов..."
     cd "$INSTALL_DIR" && docker compose down
-    log_success "MTProxy остановлен"
+    log_success "Сервисы остановлены"
 }
 
 restart_command() {
     check_root
-    if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        log_error "MTProxy не установлен."
-        exit 1
-    fi
-    log_info "Перезапускаем MTProxy..."
-    cd "$INSTALL_DIR" && docker compose restart
-    log_success "MTProxy перезапущен"
-}
-
-status_command() {
-    if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        log_error "MTProxy не установлен."
-        exit 1
-    fi
-
-    echo ""
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}  📊 Статус MTProxy${NC}"
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    local status
-    status=$(docker inspect --format='{{.State.Status}}' "$TELEMT_CONTAINER" 2>/dev/null || echo "не найден")
-    local uptime
-    uptime=$(docker inspect --format='{{.State.StartedAt}}' "$TELEMT_CONTAINER" 2>/dev/null || echo "N/A")
-
-    if [ "$status" = "running" ]; then
-        echo -e "   ${GREEN}●${NC} Контейнер: ${GREEN}работает${NC}"
-        echo -e "   ${WHITE}  Запущен: ${GRAY}$uptime${NC}"
-    elif [ "$status" = "не найден" ]; then
-        echo -e "   ${RED}●${NC} Контейнер: ${RED}не найден${NC}"
-    else
-        echo -e "   ${RED}●${NC} Контейнер: ${RED}$status${NC}"
-    fi
-
-    if load_config; then
-        echo ""
-        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "Домен:" "${DOMAIN:-не задан}"
-        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "IP:" "${SERVER_IP:-N/A}"
-        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "TLS домен:" "${TLS_DOMAIN:-N/A}"
-        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "Порт:" "${PORT:-443}"
-
-        if [ -n "${TAG:-}" ]; then
-            printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "TAG:" "$TAG"
-        fi
-    fi
-
-    echo ""
-    if curl -s --connect-timeout 2 "http://127.0.0.1:$API_PORT/v1/users" &>/dev/null; then
-        echo -e "   ${GREEN}●${NC} API: ${GREEN}доступен${NC} (порт $API_PORT)"
-    else
-        echo -e "   ${YELLOW}●${NC} API: ${YELLOW}недоступен${NC}"
-    fi
-
-    echo ""
-    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-}
-
-links_command() {
-    show_links
-}
-
-logs_command() {
-    if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        log_error "MTProxy не установлен."
-        exit 1
-    fi
-    echo -e "${GRAY}(Ctrl+C для выхода)${NC}"
-    cd "$INSTALL_DIR" && docker compose logs -f --tail=50
+    log_info "Перезапуск сервисов..."
+    down_command
+    sleep 2
+    up_command
 }
 
 # ============================================
-# Update TAG
+# STATUS
+# ============================================
+status_command() {
+    if [ ! -d "$INSTALL_DIR" ]; then
+        log_error "Не установлено"
+        return 1
+    fi
+
+    echo -e "${WHITE}📊 Статус сервисов${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    echo
+
+    cd "$INSTALL_DIR"
+
+    # Caddy status
+    local caddy_state
+    caddy_state=$(docker inspect -f '{{.State.Status}}' "$CADDY_CONTAINER" 2>/dev/null || echo "не найден")
+    case "$caddy_state" in
+        running)   echo -e "  ${GREEN}✅ Caddy:${NC}    работает" ;;
+        restarting) echo -e "  ${YELLOW}⚠️  Caddy:${NC}    перезапускается (ошибка)" ;;
+        *)         echo -e "  ${RED}❌ Caddy:${NC}    $caddy_state" ;;
+    esac
+
+    # MTProxy status
+    local mtproxy_state
+    mtproxy_state=$(docker inspect -f '{{.State.Status}}' "$MTPROXY_CONTAINER" 2>/dev/null || echo "не найден")
+    case "$mtproxy_state" in
+        running)   echo -e "  ${GREEN}✅ MTProxy:${NC}  работает" ;;
+        restarting) echo -e "  ${YELLOW}⚠️  MTProxy:${NC}  перезапускается (ошибка)" ;;
+        *)         echo -e "  ${RED}❌ MTProxy:${NC}  $mtproxy_state" ;;
+    esac
+
+    # Config info
+    if [ -f "$INSTALL_DIR/.env" ]; then
+        echo
+        echo -e "${WHITE}⚙️  Конфигурация:${NC}"
+
+        local domain port secret server_ip tag
+        domain=$(grep "^DOMAIN=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+        port=$(grep "^MTPROXY_PORT=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+        secret=$(grep "^SECRET=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+        server_ip=$(grep "^SERVER_IP=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+        tag=$(grep "^TAG=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+
+        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "Домен:" "$domain"
+        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "Сайт:" "https://$domain"
+        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "MTProxy:" "${server_ip}:${port}"
+        printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "Секрет:" "$secret"
+
+        if [ -n "$tag" ]; then
+            printf "   ${WHITE}%-15s${NC} ${GRAY}%s${NC}\n" "TAG:" "$tag"
+        fi
+
+        if [ -n "$secret" ] && [ -n "$server_ip" ] && [ -n "$port" ]; then
+            echo
+            echo -e "${WHITE}📱 Telegram ссылка:${NC}"
+            echo -e "${GREEN}   tg://proxy?server=${server_ip}&port=${port}&secret=${secret}${NC}"
+        fi
+    fi
+
+    echo
+}
+
+# ============================================
+# LOGS
+# ============================================
+logs_command() {
+    if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
+        log_error "Не установлено"
+        return 1
+    fi
+
+    echo -e "${WHITE}📝 Логи (Ctrl+C для выхода)${NC}"
+    echo
+    echo -e "${WHITE}Какие логи показать?${NC}"
+    echo -e "   ${WHITE}1)${NC} ${GRAY}Все${NC}"
+    echo -e "   ${WHITE}2)${NC} ${GRAY}Только Caddy${NC}"
+    echo -e "   ${WHITE}3)${NC} ${GRAY}Только MTProxy${NC}"
+    echo
+    read -p "Выберите [1-3]: " choice
+
+    cd "$INSTALL_DIR"
+    case "$choice" in
+        2) docker compose logs -f caddy ;;
+        3) docker compose logs -f mtproto-proxy ;;
+        *) docker compose logs -f ;;
+    esac
+}
+
+# ============================================
+# TEMPLATE
+# ============================================
+template_command() {
+    check_root
+
+    if [ ! -d "$INSTALL_DIR" ]; then
+        log_error "Не установлено"
+        return 1
+    fi
+
+    while true; do
+        clear
+        echo -e "${WHITE}🎨 Управление шаблонами${NC}"
+        echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+        echo
+
+        for i in $(seq 1 11); do
+            printf "   ${WHITE}%-3s${NC} ${CYAN}%s${NC}\n" "$i)" "${TEMPLATE_NAMES[$i]}"
+        done
+        echo
+        echo -e "   ${WHITE}r)${NC}  ${GRAY}🎲 Случайный${NC}"
+        echo -e "   ${WHITE}v)${NC}  ${GRAY}📄 Текущий шаблон${NC}"
+        echo -e "   ${WHITE}0)${NC}  ${GRAY}⬅️  Назад${NC}"
+        echo
+
+        read -p "Выберите [0-11, r, v]: " choice
+
+        case "$choice" in
+            [1-9]|10|11)
+                echo
+                if download_template "$choice"; then
+                    log_success "Шаблон установлен!"
+                    echo
+                    read -p "Перезапустить Caddy? [Y/n]: " -r
+                    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                        cd "$INSTALL_DIR" && docker compose restart caddy
+                        log_success "Caddy перезапущен"
+                    fi
+                fi
+                read -p "Нажмите Enter..."
+                ;;
+            r|R)
+                local rid=$((RANDOM % 11 + 1))
+                echo -e "${CYAN}🎲 Случайный: ${TEMPLATE_NAMES[$rid]}${NC}"
+                echo
+                download_template "$rid"
+                cd "$INSTALL_DIR" && docker compose restart caddy 2>/dev/null || true
+                read -p "Нажмите Enter..."
+                ;;
+            v|V)
+                echo
+                if [ -f "$HTML_DIR/index.html" ]; then
+                    local title
+                    title=$(grep -o '<title>[^<]*</title>' "$HTML_DIR/index.html" 2>/dev/null | sed 's/<title>\|<\/title>//g' | head -1)
+                    local fcount
+                    fcount=$(find "$HTML_DIR" -type f | wc -l)
+                    local fsize
+                    fsize=$(du -sh "$HTML_DIR" 2>/dev/null | cut -f1)
+                    echo -e "${WHITE}   Title:${NC} ${GRAY}${title:-Unknown}${NC}"
+                    echo -e "${WHITE}   Файлов:${NC} ${GRAY}$fcount${NC}"
+                    echo -e "${WHITE}   Размер:${NC} ${GRAY}$fsize${NC}"
+                    echo -e "${WHITE}   Путь:${NC} ${GRAY}$HTML_DIR${NC}"
+                else
+                    echo -e "${GRAY}   Шаблон не установлен${NC}"
+                fi
+                echo
+                read -p "Нажмите Enter..."
+                ;;
+            0) return 0 ;;
+            *) log_error "Неверный выбор"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================
+# UPDATE TAG
 # ============================================
 update_tag_command() {
     check_root
 
-    if ! load_config; then
-        log_error "Конфигурация не найдена."
+    if [ ! -f "$INSTALL_DIR/.env" ]; then
+        log_error "Не установлено"
         return 1
     fi
 
-    echo ""
-    echo -e "${WHITE}─── Обновление TAG ───${NC}"
-    echo -e "${GRAY}Текущий TAG: ${TAG:-не задан}${NC}"
-    echo -e "${GRAY}Получите TAG у @MTProxybot в Telegram${NC}"
-    echo -e "${GRAY}⚠️  Ссылка от бота НЕ будет работать — используйте только TAG.${NC}"
-    echo ""
+    echo -e "${WHITE}🏷️  Обновление TAG от @MTProxybot${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    echo
+    echo -e "${CYAN}Как получить TAG:${NC}"
+    echo -e "${GRAY}1. Откройте @MTProxybot в Telegram${NC}"
+    echo -e "${GRAY}2. Отправьте /newproxy${NC}"
+    echo -e "${GRAY}3. Зарегистрируйте прокси${NC}"
+    echo -e "${GRAY}4. Бот выдаст TAG (32 hex символа)${NC}"
+    echo
+
     read -p "Введите TAG (пусто для удаления): " new_tag
 
     if [ -n "$new_tag" ]; then
         if [[ ! "$new_tag" =~ ^[0-9a-fA-F]{32}$ ]]; then
-            log_error "TAG должен быть 32-символьной HEX строкой"
+            log_error "Неверный формат TAG"
             return 1
         fi
-    fi
-
-    sed -i "s/^TAG=.*/TAG=$new_tag/" "$INSTALL_DIR/.env"
-    create_config_toml "${TLS_DOMAIN}" "${SECRET}" "$new_tag" "${PORT:-443}"
-
-    log_info "Перезапускаем MTProxy..."
-    cd "$INSTALL_DIR" && docker compose restart
-
-    if [ -n "$new_tag" ]; then
+        sed -i "s/^TAG=.*/TAG=$new_tag/" "$INSTALL_DIR/.env"
         log_success "TAG обновлён: $new_tag"
     else
+        sed -i "s/^TAG=.*/TAG=/" "$INSTALL_DIR/.env"
         log_success "TAG удалён"
     fi
+
+    # Regenerate docker-compose with new TAG
+    local domain port secret server_ip
+    domain=$(grep "^DOMAIN=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+    port=$(grep "^MTPROXY_PORT=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+    secret=$(grep "^SECRET=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+    server_ip=$(grep "^SERVER_IP=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+
+    create_docker_compose "$domain" "$port" "$secret" "$new_tag"
+
+    echo
+    log_info "Перезапуск MTProxy..."
+    cd "$INSTALL_DIR" && docker compose up -d mtproto-proxy
+    log_success "MTProxy перезапущен с новым TAG"
 }
 
 # ============================================
-# Update TLS Domain
-# ============================================
-update_tls_domain_command() {
-    check_root
-
-    if ! load_config; then
-        log_error "Конфигурация не найдена."
-        return 1
-    fi
-
-    echo ""
-    echo -e "${WHITE}─── Обновление TLS домена ───${NC}"
-    echo -e "${GRAY}Текущий TLS домен: ${TLS_DOMAIN:-не задан}${NC}"
-    echo -e "${RED}⚠️  Смена TLS домена сделает все текущие ссылки недействительными!${NC}"
-    echo ""
-    read -p "Новый TLS домен: " new_tls_domain
-
-    if [ -z "$new_tls_domain" ]; then
-        log_error "Домен не может быть пустым"
-        return 1
-    fi
-
-    sed -i "s/^TLS_DOMAIN=.*/TLS_DOMAIN=$new_tls_domain/" "$INSTALL_DIR/.env"
-    create_config_toml "$new_tls_domain" "${SECRET}" "${TAG:-}" "${PORT:-443}"
-
-    log_info "Перезапускаем MTProxy..."
-    cd "$INSTALL_DIR" && docker compose restart
-
-    log_success "TLS домен обновлён: $new_tls_domain"
-    echo ""
-    log_warning "Все старые ссылки больше не работают! Получите новые:"
-    echo -e "   ${CYAN}$APP_NAME links${NC}"
-}
-
-# ============================================
-# Edit Configuration
+# EDIT
 # ============================================
 edit_command() {
     check_root
 
-    if [ ! -f "$INSTALL_DIR/config.toml" ]; then
-        log_error "Конфигурация не найдена."
+    if [ ! -d "$INSTALL_DIR" ]; then
+        log_error "Не установлено"
         return 1
     fi
 
-    local editor="${EDITOR:-nano}"
-    if ! command_exists "$editor"; then
-        editor="vi"
-    fi
+    echo -e "${WHITE}✏️  Редактирование конфигурации${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    echo
+    echo -e "   ${WHITE}1)${NC} ${GRAY}Caddyfile${NC}"
+    echo -e "   ${WHITE}2)${NC} ${GRAY}docker-compose.yml${NC}"
+    echo -e "   ${WHITE}3)${NC} ${GRAY}.env (параметры)${NC}"
+    echo -e "   ${WHITE}0)${NC} ${GRAY}Отмена${NC}"
+    echo
 
-    log_info "Открываем config.toml в $editor..."
-    "$editor" "$INSTALL_DIR/config.toml"
+    read -p "Выберите [0-3]: " choice
 
-    read -p "Перезапустить MTProxy для применения изменений? (Y/n): " restart_choice
-    if [[ ! "$restart_choice" =~ ^[Nn]$ ]]; then
-        cd "$INSTALL_DIR" && docker compose restart
-        log_success "MTProxy перезапущен"
-    fi
+    case "$choice" in
+        1)
+            ${EDITOR:-nano} "$INSTALL_DIR/Caddyfile"
+            log_warning "Перезапустите для применения: $APP_NAME restart"
+            ;;
+        2)
+            ${EDITOR:-nano} "$INSTALL_DIR/docker-compose.yml"
+            log_warning "Перезапустите для применения: $APP_NAME restart"
+            ;;
+        3)
+            ${EDITOR:-nano} "$INSTALL_DIR/.env"
+            log_warning "Перезапустите для применения: $APP_NAME restart"
+            ;;
+        *) echo -e "${GRAY}Отменено${NC}" ;;
+    esac
 }
 
 # ============================================
-# Update (pull latest image)
-# ============================================
-update_command() {
-    check_root
-
-    if [ ! -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        log_error "MTProxy не установлен."
-        exit 1
-    fi
-
-    log_info "Обновляем образ telemt..."
-    cd "$INSTALL_DIR"
-    docker compose pull
-
-    log_info "Перезапускаем с новым образом..."
-    docker compose up -d
-
-    log_success "MTProxy обновлён до последней версии"
-}
-
-# ============================================
-# Uninstall
+# UNINSTALL
 # ============================================
 uninstall_command() {
     check_root
 
-    echo ""
-    echo -e "${RED}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}║${NC}  ${WHITE}⚠️  Удаление MTProxy${NC}                              ${RED}║${NC}"
-    echo -e "${RED}╚════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "${YELLOW}Будут удалены:${NC}"
-    echo "   • Docker контейнер telemt"
-    echo "   • Директория $INSTALL_DIR"
-    echo "   • Команда /usr/local/bin/$APP_NAME"
-    echo ""
+    echo -e "${WHITE}🗑️  Удаление Caddy + MTProxy${NC}"
+    echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+    echo
 
-    read -p "Вы уверены? (y/N): " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "Отмена"
+    if [ ! -d "$INSTALL_DIR" ]; then
+        log_warning "Не установлено"
         return 0
     fi
 
-    if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
-        log_info "Останавливаем контейнеры..."
-        cd "$INSTALL_DIR" && docker compose down -v 2>/dev/null || true
+    log_warning "Это полностью удалит Caddy + MTProxy и все данные!"
+    echo
+    read -p "Вы уверены? (введите YES): " confirm
+
+    if [ "$confirm" != "YES" ]; then
+        echo -e "${GRAY}Отменено${NC}"
+        return 0
     fi
 
-    docker rmi "$TELEMT_IMAGE" 2>/dev/null || true
+    echo
+    log_info "Остановка сервисов..."
+    cd "$INSTALL_DIR" && docker compose down -v 2>/dev/null || true
+
+    log_info "Удаление Docker образов..."
+    docker rmi "caddy:${CADDY_VERSION}" 2>/dev/null || true
+    docker rmi telegrammessenger/proxy:latest 2>/dev/null || true
+
+    log_info "Удаление файлов..."
     rm -rf "$INSTALL_DIR"
-    rm -f /usr/local/bin/"$APP_NAME"
 
-    if command_exists ufw; then
-        ufw delete allow 443/tcp 2>/dev/null || true
-    fi
+    log_info "Удаление утилиты управления..."
+    rm -f "/usr/local/bin/$APP_NAME"
 
-    echo ""
-    log_success "MTProxy полностью удалён"
+    echo
+    log_success "Caddy + MTProxy полностью удалены"
 }
 
 # ============================================
-# Help
+# SHOW LINKS
+# ============================================
+links_command() {
+    if [ ! -f "$INSTALL_DIR/.env" ]; then
+        log_error "Не установлено"
+        return 1
+    fi
+
+    local domain port secret server_ip
+    domain=$(grep "^DOMAIN=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+    port=$(grep "^MTPROXY_PORT=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+    secret=$(grep "^SECRET=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+    server_ip=$(grep "^SERVER_IP=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+
+    local proxy_link_domain="tg://proxy?server=${domain}&port=${port}&secret=${secret}"
+    local proxy_link_ip="tg://proxy?server=${server_ip}&port=${port}&secret=${secret}"
+    local web_link_domain="https://t.me/proxy?server=${domain}&port=${port}&secret=${secret}"
+
+    echo
+    echo -e "${WHITE}🔗 Ссылки для подключения${NC}"
+    echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
+    echo
+    echo -e "  ${WHITE}🌐 Сайт:${NC}       https://$domain"
+    echo
+    echo -e "  ${WHITE}📱 По домену (рекомендуется):${NC}"
+    echo -e "  ${GREEN}$proxy_link_domain${NC}"
+    echo
+    echo -e "  ${WHITE}📱 По IP:${NC}"
+    echo -e "  ${GRAY}$proxy_link_ip${NC}"
+    echo
+    echo -e "  ${WHITE}🌐 Web ссылка:${NC}"
+    echo -e "  ${GREEN}$web_link_domain${NC}"
+    echo
+    echo -e "  ${WHITE}🔑 Секрет:${NC}     $secret"
+    echo -e "  ${WHITE}🔌 Порт:${NC}       $port"
+    echo -e "  ${WHITE}🖥️  Сервер:${NC}     $server_ip ($domain)"
+    echo
+    echo -e "${GRAY}$(printf '═%.0s' $(seq 1 55))${NC}"
+    echo
+}
+
+# ============================================
+# HELP
 # ============================================
 show_help() {
-    echo ""
-    echo -e "${CYAN}MTProxy Manager v${SCRIPT_VERSION}${NC} (telemt)"
-    echo ""
-    echo -e "${WHITE}Использование:${NC} $APP_NAME [команда]"
-    echo ""
+    echo -e "${WHITE}Caddy + MTProxy Management v$SCRIPT_VERSION${NC}"
+    echo
+    echo -e "${WHITE}Использование:${NC}"
+    echo -e "  ${CYAN}$APP_NAME${NC} [${GRAY}команда${NC}]"
+    echo
     echo -e "${WHITE}Команды:${NC}"
-    printf "   ${CYAN}%-18s${NC} %s\n" "install"       "📦 Установить MTProxy"
-    printf "   ${CYAN}%-18s${NC} %s\n" "up / start"    "▶️  Запустить"
-    printf "   ${CYAN}%-18s${NC} %s\n" "down / stop"   "⏹️  Остановить"
-    printf "   ${CYAN}%-18s${NC} %s\n" "restart"       "🔄 Перезапустить"
-    printf "   ${CYAN}%-18s${NC} %s\n" "status"        "📊 Статус"
-    printf "   ${CYAN}%-18s${NC} %s\n" "links"         "🔗 Показать ссылки"
-    printf "   ${CYAN}%-18s${NC} %s\n" "logs"          "📜 Логи (live)"
-    printf "   ${CYAN}%-18s${NC} %s\n" "update-tag"    "🏷️  Обновить TAG"
-    printf "   ${CYAN}%-18s${NC} %s\n" "update-tls"    "🌐 Сменить TLS домен"
-    printf "   ${CYAN}%-18s${NC} %s\n" "update"        "⬆️  Обновить telemt"
-    printf "   ${CYAN}%-18s${NC} %s\n" "edit"          "✏️  Редактировать config"
-    printf "   ${CYAN}%-18s${NC} %s\n" "uninstall"     "🗑️  Удалить"
-    printf "   ${CYAN}%-18s${NC} %s\n" "menu"          "📋 Интерактивное меню"
-    printf "   ${CYAN}%-18s${NC} %s\n" "help"          "❓ Эта справка"
-    echo ""
-    echo -e "${GRAY}Без аргументов — интерактивное меню${NC}"
-    echo ""
+    printf "   ${CYAN}%-14s${NC} %s\n" "install"    "🚀 Установить Caddy + MTProxy"
+    printf "   ${CYAN}%-14s${NC} %s\n" "up"         "▶️  Запустить сервисы"
+    printf "   ${CYAN}%-14s${NC} %s\n" "down"       "⏹️  Остановить сервисы"
+    printf "   ${CYAN}%-14s${NC} %s\n" "restart"    "🔄 Перезапустить сервисы"
+    printf "   ${CYAN}%-14s${NC} %s\n" "status"     "📊 Статус сервисов"
+    printf "   ${CYAN}%-14s${NC} %s\n" "logs"       "📝 Просмотр логов"
+    printf "   ${CYAN}%-14s${NC} %s\n" "links"      "🔗 Показать ссылки для подключения"
+    printf "   ${CYAN}%-14s${NC} %s\n" "template"   "🎨 Управление шаблонами сайта"
+    printf "   ${CYAN}%-14s${NC} %s\n" "update-tag" "🏷️  Обновить TAG от @MTProxybot"
+    printf "   ${CYAN}%-14s${NC} %s\n" "edit"       "✏️  Редактировать конфигурацию"
+    printf "   ${CYAN}%-14s${NC} %s\n" "uninstall"  "🗑️  Полное удаление"
+    printf "   ${CYAN}%-14s${NC} %s\n" "menu"       "📋 Интерактивное меню"
+    printf "   ${CYAN}%-14s${NC} %s\n" "help"       "❓ Эта справка"
+    echo
+    echo -e "${WHITE}Архитектура:${NC}"
+    echo -e "  ${GRAY}Caddy на порту 443 — полноценный HTTPS-сайт с Let's Encrypt${NC}"
+    echo -e "  ${GRAY}MTProxy на отдельном порту — Fake TLS имитирует ваш сайт${NC}"
+    echo
 }
 
 # ============================================
-# Interactive Menu
+# INTERACTIVE MENU
 # ============================================
 main_menu() {
     while true; do
         clear
-        echo ""
-        echo -e "${CYAN}╔════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║${NC}  ${WHITE}🚀 MTProxy Manager v${SCRIPT_VERSION}${NC}                       ${CYAN}║${NC}"
-        echo -e "${CYAN}║${NC}  ${GRAY}telemt • Fake TLS • Docker${NC}                       ${CYAN}║${NC}"
-        echo -e "${CYAN}╚════════════════════════════════════════════════════╝${NC}"
-        echo ""
+        echo -e "${WHITE}🔗 Caddy + MTProxy${NC}"
+        echo -e "${GRAY}Управление v$SCRIPT_VERSION${NC}"
+        echo -e "${GRAY}$(printf '─%.0s' $(seq 1 40))${NC}"
+        echo
 
-        local container_status
-        container_status=$(docker inspect --format='{{.State.Status}}' "$TELEMT_CONTAINER" 2>/dev/null || echo "не установлен")
-        if [ "$container_status" = "running" ]; then
-            echo -e "   Статус: ${GREEN}● работает${NC}"
+        # Quick status
+        if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+            local c_state m_state
+            c_state=$(docker inspect -f '{{.State.Status}}' "$CADDY_CONTAINER" 2>/dev/null || echo "off")
+            m_state=$(docker inspect -f '{{.State.Status}}' "$MTPROXY_CONTAINER" 2>/dev/null || echo "off")
+
+            local c_icon m_icon
+            [ "$c_state" = "running" ] && c_icon="${GREEN}●${NC}" || c_icon="${RED}●${NC}"
+            [ "$m_state" = "running" ] && m_icon="${GREEN}●${NC}" || m_icon="${RED}●${NC}"
+
+            echo -e "  ${c_icon} Caddy: $c_state    ${m_icon} MTProxy: $m_state"
+
+            local domain=""
+            if [ -f "$INSTALL_DIR/.env" ]; then
+                domain=$(grep "^DOMAIN=" "$INSTALL_DIR/.env" | cut -d'=' -f2)
+                [ -n "$domain" ] && echo -e "  ${GRAY}https://$domain${NC}"
+            fi
         else
-            echo -e "   Статус: ${RED}● $container_status${NC}"
+            echo -e "  ${GRAY}📦 Не установлено${NC}"
         fi
-        echo ""
 
-        echo -e "${WHITE}   Выберите действие:${NC}"
-        echo ""
-        echo -e "   ${CYAN} 1)${NC}  📦 Установить MTProxy"
-        echo -e "   ${CYAN} 2)${NC}  ▶️  Запустить"
-        echo -e "   ${CYAN} 3)${NC}  ⏹️  Остановить"
-        echo -e "   ${CYAN} 4)${NC}  🔄 Перезапустить"
-        echo -e "   ${CYAN} 5)${NC}  📊 Статус"
-        echo -e "   ${CYAN} 6)${NC}  🔗 Ссылки"
-        echo -e "   ${CYAN} 7)${NC}  📜 Логи"
-        echo -e "   ${CYAN} 8)${NC}  🏷️  Обновить TAG"
-        echo -e "   ${CYAN} 9)${NC}  🌐 Сменить TLS домен"
-        echo -e "   ${CYAN}10)${NC}  ⬆️  Обновить telemt"
-        echo -e "   ${CYAN}11)${NC}  ✏️  Редактировать config"
-        echo -e "   ${CYAN}12)${NC}  🗑️  Удалить"
-        echo -e "   ${CYAN} 0)${NC}  🚪 Выход"
-        echo ""
+        echo
+        echo -e "${WHITE}🔧 Сервисы:${NC}"
+        echo -e "   ${WHITE}1)${NC}  🚀 Установить"
+        echo -e "   ${WHITE}2)${NC}  ▶️  Запустить"
+        echo -e "   ${WHITE}3)${NC}  ⏹️  Остановить"
+        echo -e "   ${WHITE}4)${NC}  🔄 Перезапустить"
+        echo -e "   ${WHITE}5)${NC}  📊 Статус"
+        echo
+        echo -e "${WHITE}📋 Управление:${NC}"
+        echo -e "   ${WHITE}6)${NC}  🔗 Ссылки для подключения"
+        echo -e "   ${WHITE}7)${NC}  🎨 Шаблоны сайта"
+        echo -e "   ${WHITE}8)${NC}  📝 Логи"
+        echo -e "   ${WHITE}9)${NC}  🏷️  Обновить TAG"
+        echo -e "   ${WHITE}10)${NC} ✏️  Редактировать конфиг"
+        echo
+        echo -e "${WHITE}🗑️  Обслуживание:${NC}"
+        echo -e "   ${WHITE}11)${NC} 🗑️  Удалить всё"
+        echo
+        echo -e "   ${GRAY}0)${NC}  ⬅️  Выход"
+        echo
 
-        read -p "   Выбор [0-12]: " choice
+        read -p "$(echo -e "${WHITE}Выберите [0-11]:${NC} ")" choice
 
         case "$choice" in
             1)  install_command; read -p "Нажмите Enter..." ;;
@@ -921,13 +1231,12 @@ main_menu() {
             4)  restart_command; read -p "Нажмите Enter..." ;;
             5)  status_command; read -p "Нажмите Enter..." ;;
             6)  links_command; read -p "Нажмите Enter..." ;;
-            7)  logs_command ;;
-            8)  update_tag_command; read -p "Нажмите Enter..." ;;
-            9)  update_tls_domain_command; read -p "Нажмите Enter..." ;;
-            10) update_command; read -p "Нажмите Enter..." ;;
-            11) edit_command; read -p "Нажмите Enter..." ;;
-            12) uninstall_command; read -p "Нажмите Enter..." ;;
-            0)  echo ""; log_info "До свидания!"; exit 0 ;;
+            7)  template_command ;;
+            8)  logs_command; read -p "Нажмите Enter..." ;;
+            9)  update_tag_command; read -p "Нажмите Enter..." ;;
+            10) edit_command; read -p "Нажмите Enter..." ;;
+            11) uninstall_command; read -p "Нажмите Enter..." ;;
+            0)  clear; exit 0 ;;
             *)  log_error "Неверный выбор"; sleep 1 ;;
         esac
     done
@@ -939,25 +1248,23 @@ main_menu() {
 COMMAND="${1:-}"
 
 case "$COMMAND" in
-    install)        install_command ;;
-    up|start)       up_command ;;
-    down|stop)      down_command ;;
-    restart)        restart_command ;;
-    status)         status_command ;;
-    logs)           logs_command ;;
-    links)          links_command ;;
-    update-tag)     update_tag_command ;;
-    update-tls)     update_tls_domain_command ;;
-    update)         update_command ;;
-    edit)           edit_command ;;
-    uninstall)      uninstall_command ;;
+    install)    install_command ;;
+    up|start)   up_command ;;
+    down|stop)  down_command ;;
+    restart)    restart_command ;;
+    status)     status_command ;;
+    logs)       logs_command ;;
+    links)      links_command ;;
+    template)   template_command ;;
+    update-tag) update_tag_command ;;
+    edit)       edit_command ;;
+    uninstall)  uninstall_command ;;
     help|-h|--help) show_help ;;
-    menu)           main_menu ;;
-    "")             main_menu ;;
+    menu)       main_menu ;;
+    "")         main_menu ;;
     *)
         log_error "Неизвестная команда: $COMMAND"
         echo "Используйте: $APP_NAME help"
         exit 1
         ;;
 esac
-}  # ← End of buffer block for curl | bash
