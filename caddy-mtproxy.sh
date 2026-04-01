@@ -15,7 +15,7 @@
 
 SCRIPT_VERSION="3.1.0"
 APP_NAME="mtproxy"
-SCRIPT_URL="https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/caddy-mtproxy.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/ildar58/vpn_tools/main/caddy-mtproxy.sh"
 
 set -euo pipefail
 
