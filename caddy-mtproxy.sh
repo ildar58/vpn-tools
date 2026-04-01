@@ -279,6 +279,30 @@ show_links() {
     fi
 
     local port="${PORT:-443}"
+    local client_secret=""
+
+    # Extract correct secret from API (telemt generates it properly)
+    local api_response
+    if api_response=$(get_links_from_api) && [ -n "$api_response" ] && [ "$api_response" != "null" ]; then
+        if command_exists jq; then
+            # Get first TLS link from API and extract the secret
+            local api_link
+            api_link=$(echo "$api_response" | jq -r '.data[0].links.tls[0] // empty' 2>/dev/null)
+            if [ -n "$api_link" ]; then
+                # Extract secret parameter from the tg:// link
+                client_secret=$(echo "$api_link" | grep -oP 'secret=\K[0-9a-fA-F]+' 2>/dev/null || \
+                                echo "$api_link" | sed -n 's/.*secret=\([0-9a-fA-F]*\).*/\1/p')
+            fi
+        fi
+    fi
+
+    # Fallback: build secret manually if API didn't return it
+    if [ -z "$client_secret" ]; then
+        local tls_hex
+        tls_hex=$(echo -n "${TLS_DOMAIN}" | xxd -p | tr -d '\n')
+        client_secret="ee${SECRET}${tls_hex}"
+        log_warning "API недоступен, секрет сгенерирован вручную"
+    fi
 
     echo ""
     echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
@@ -286,41 +310,17 @@ show_links() {
     echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
     echo ""
 
-    # Try API first
-    local api_response
-    if api_response=$(get_links_from_api) && [ -n "$api_response" ] && [ "$api_response" != "null" ]; then
-        echo -e "${GREEN}📌 Ссылки от telemt API:${NC}"
-        echo ""
-        if command_exists jq; then
-            echo "$api_response" | jq -r '
-                .[] |
-                "   👤 \(.name):" ,
-                (if .tls then "      \(.tls)" else empty end),
-                ""
-            ' 2>/dev/null || echo "   $api_response"
-        else
-            echo "   $api_response"
-        fi
-        echo ""
-    fi
-
-    # Manual links (always show for convenience)
-    local tls_hex
-    tls_hex=$(echo -n "${TLS_DOMAIN}" | xxd -p | tr -d '\n')
-    local client_secret="ee${SECRET}${tls_hex}"
-
-    echo -e "${WHITE}📌 Ручные ссылки:${NC}"
-    echo ""
-
     if [ -n "${DOMAIN:-}" ] && [ "${DOMAIN}" != "${SERVER_IP:-}" ]; then
-        echo -e "${GREEN}   По домену (рекомендуется):${NC}"
+        echo -e "${GREEN}📌 По домену (рекомендуется):${NC}"
+        echo ""
         echo -e "   ${WHITE}tg://proxy?server=${DOMAIN}&port=${port}&secret=${client_secret}${NC}"
         echo ""
         echo -e "   ${WHITE}https://t.me/proxy?server=${DOMAIN}&port=${port}&secret=${client_secret}${NC}"
         echo ""
     fi
 
-    echo -e "${YELLOW}   По IP:${NC}"
+    echo -e "${YELLOW}📌 По IP:${NC}"
+    echo ""
     echo -e "   ${WHITE}tg://proxy?server=${SERVER_IP}&port=${port}&secret=${client_secret}${NC}"
     echo ""
     echo -e "   ${WHITE}https://t.me/proxy?server=${SERVER_IP}&port=${port}&secret=${client_secret}${NC}"
