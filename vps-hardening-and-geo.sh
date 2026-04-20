@@ -47,11 +47,6 @@ ensure_ufw_rule "deny out 465/tcp"
 ensure_ufw_rule "allow 443/tcp"
 ensure_ufw_rule "allow 22/tcp"
 ensure_ufw_rule "allow 80/tcp"
-ensure_ufw_rule "allow from 84.200.193.142 to any port 2222"
-ensure_ufw_rule "allow from 109.122.199.37 to any port 9999"
-ensure_ufw_rule "allow from 81.200.151.202 to any port 9999"
-ensure_ufw_rule "allow from 95.85.240.116 to any port 9999"
-ensure_ufw_rule "allow from 89.208.220.150 to any port 9999"
 
 log_ok "Setting UFW default policy..."
 ufw default deny incoming
