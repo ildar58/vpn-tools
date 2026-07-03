@@ -56,6 +56,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ildar58/vpn-tools/main/vps-h
 уровне рвётся TCP-подключение к xray-ноде. Поиск ноды по домену (приоритетно),
 поддерживается и `ip:порт`.
 
+### Быстрый запуск
+
+> Замените `node.example.com` на домен (или `ip:порт`) вашей ноды.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ildar58/vpn-tools/main/xray-block-analyzer.sh | sudo bash -s -- node.example.com
+```
+
 ### Что проверяет (по уровням)
 
 1. **DNS** — сравнивает ответ системного резолвера, внешних UDP-резолверов
