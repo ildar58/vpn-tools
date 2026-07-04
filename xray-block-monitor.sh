@@ -25,13 +25,17 @@
 #   --interval N     секунд между пробами (по умолчанию 5)
 #   --duration N     сколько всего секунд мониторить (по умолчанию 3600; 0 = до Ctrl-C)
 #   --tls            дополнительно проверять TLS-хендшейк (ловит блок по SNI/L7)
+#   --load           генерировать трафик на ноду (провоцировать volume-триггер ТСПУ)
+#   --load-workers N число параллельных воркеров нагрузки (по умолчанию 4)
 #   --control H[:P]  контрольный хост (по умолчанию www.google.com:443)
 #   --log FILE       писать CSV-лог проб
 #   -h, --help       справка
 #
-# Совет: чтобы поймать блок, ТРИГГЕРящийся объёмом трафика, запускайте монитор
-# ОДНОВРЕМЕННО с реальным использованием ноды (стриминг/скачивание через туннель).
-# Монитор зафиксирует, в какой момент и на сколько нода «гаснет».
+# Совет: чтобы поймать блок, ТРИГГЕРящийся объёмом трафика, есть два пути:
+#   1) запускать монитор ОДНОВРЕМЕННО с реальным использованием ноды, либо
+#   2) добавить флаг --load — монитор сам нагрузит ноду HTTPS-трафиком
+#      (с корректным SNI; для Reality это тот же паттерн, что видит ТСПУ)
+#      и зафиксирует, через сколько под нагрузкой нода «гаснет».
 #
 # Примеры:
 #   bash xray-block-monitor.sh node.example.com --tls
@@ -61,17 +65,20 @@ usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 # ---------------------------------------------------------------------------
 TARGET_ARG=""; PORT=""; INTERVAL=5; DURATION=3600
 DO_TLS=0; CONTROL="www.google.com:443"; LOGFILE=""; SNI=""
+LOAD=0; LOAD_WORKERS=4
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help)   usage 0 ;;
-    --interval)  INTERVAL="${2:-5}"; shift 2 ;;
-    --duration)  DURATION="${2:-3600}"; shift 2 ;;
-    --tls)       DO_TLS=1; shift ;;
-    --sni)       SNI="${2:-}"; shift 2 ;;
-    --control)   CONTROL="${2:-}"; shift 2 ;;
-    --log)       LOGFILE="${2:-}"; shift 2 ;;
-    -*)          log_err "Неизвестная опция: $1"; usage 1 ;;
+    -h|--help)      usage 0 ;;
+    --interval)     INTERVAL="${2:-5}"; shift 2 ;;
+    --duration)     DURATION="${2:-3600}"; shift 2 ;;
+    --tls)          DO_TLS=1; shift ;;
+    --load)         LOAD=1; shift ;;
+    --load-workers) LOAD_WORKERS="${2:-4}"; shift 2 ;;
+    --sni)          SNI="${2:-}"; shift 2 ;;
+    --control)      CONTROL="${2:-}"; shift 2 ;;
+    --log)          LOGFILE="${2:-}"; shift 2 ;;
+    -*)             log_err "Неизвестная опция: $1"; usage 1 ;;
     *) if [[ -z "$TARGET_ARG" ]]; then TARGET_ARG="$1"
        elif [[ -z "$PORT" ]]; then PORT="$1"
        else log_err "Лишний аргумент: $1"; usage 1; fi; shift ;;
@@ -93,6 +100,7 @@ fi
 PORT="${PORT:-443}"
 { [[ "$INTERVAL" =~ ^[0-9]+$ ]] && (( INTERVAL >= 1 )); } || { log_err "Некорректный --interval"; exit 1; }
 [[ "$DURATION" =~ ^[0-9]+$ ]] || { log_err "Некорректный --duration"; exit 1; }
+{ [[ "$LOAD_WORKERS" =~ ^[0-9]+$ ]] && (( LOAD_WORKERS >= 1 && LOAD_WORKERS <= 64 )); } || { log_err "Некорректный --load-workers (1..64)"; exit 1; }
 
 is_ip() { [[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || [[ "$1" == *:*:* ]]; }
 [[ -z "$SNI" ]] && ! is_ip "$HOST" && SNI="$HOST"
@@ -160,6 +168,42 @@ now()      { date +%s; }
 clock()    { date +%H:%M:%S; }
 # секунды -> "Xм Yс"
 human()    { local s="$1"; printf '%dм %02dс' $(( s / 60 )) $(( s % 60 )); }
+# байты -> человекочитаемо
+human_bytes() {
+  local b="$1"
+  if   (( b >= 1073741824 )); then printf '%d.%02d ГБ' $(( b / 1073741824 )) $(( (b % 1073741824) * 100 / 1073741824 ))
+  elif (( b >= 1048576 ));    then printf '%d.%02d МБ' $(( b / 1048576 )) $(( (b % 1048576) * 100 / 1048576 ))
+  elif (( b >= 1024 ));       then printf '%d.%02d КБ' $(( b / 1024 )) $(( (b % 1024) * 100 / 1024 ))
+  else printf '%d Б' "$b"; fi
+}
+
+# Один воркер нагрузки: непрерывно шлёт HTTPS-запросы на ноду, копит статистику
+# запросов/байт в файл. Для Reality используем реальный SNI и --resolve, чтобы
+# соединяться именно на IP:порт ноды, но с «белым» именем — тот же паттерн,
+# что видит ТСПУ при настоящем использовании.
+load_worker() {
+  local ip="$1" port="$2" sni="$3" statfile="$4" stopflag="$5"
+  local reqs=0 bytes=0 sz
+  echo "0 0" > "$statfile"
+  while [[ ! -f "$stopflag" ]]; do
+    sz=0
+    if have curl; then
+      if [[ -n "$sni" ]]; then
+        sz="$(curl -sk --resolve "$sni:$port:$ip" --max-time 15 -o /dev/null -w '%{size_download}' "https://$sni:$port/" 2>/dev/null)"
+      else
+        sz="$(curl -sk --max-time 15 -o /dev/null -w '%{size_download}' "https://$ip:$port/" 2>/dev/null)"
+      fi
+      [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
+    else
+      # фолбэк без curl: TLS + HTTP-запрос через openssl (объём меньше, но флоу есть)
+      printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "${sni:-$ip}" \
+        | with_timeout 15 openssl s_client -quiet -connect "$ip:$port" ${sni:+-servername "$sni"} >/dev/null 2>&1
+    fi
+    reqs=$(( reqs + 1 )); bytes=$(( bytes + sz ))
+    echo "$reqs $bytes" > "$statfile"
+    sleep 0.2
+  done
+}
 
 # ---------------------------------------------------------------------------
 # Резолв цели
@@ -173,9 +217,48 @@ log_info "Нода:      $HOST:$PORT  (IP $IP)"
 log_info "TLS-проба: $([[ $DO_TLS -eq 1 ]] && echo "да (SNI ${SNI:-<нет>})" || echo нет)"
 log_info "Интервал:  ${INTERVAL}с   Длительность: $([[ "$DURATION" -eq 0 ]] && echo '∞ (до Ctrl-C)' || human "$DURATION")"
 log_info "Контроль:  $CONTROL_HOST:$CONTROL_PORT${CONTROL_IP:+ (IP $CONTROL_IP)}"
+if [[ "$LOAD" -eq 1 ]]; then
+  log_info "Нагрузка:  включена, воркеров $LOAD_WORKERS $(have curl && echo '(curl HTTPS)' || echo '(openssl-фолбэк)')"
+  [[ -z "$SNI" ]] && log_warn "SNI не задан — нагрузка пойдёт на голый IP; для Reality укажите --sni <домен>."
+else
+  log_info "Нагрузка:  выключена (только пассивные пробы; volume-триггер так может не сработать)"
+fi
 [[ -n "$LOGFILE" ]] && { echo "epoch,time,node_state,reason,control_state,streak_sec" > "$LOGFILE"; log_info "CSV-лог:   $LOGFILE"; }
 log_info "Останов — Ctrl-C. Итоги печатаются при выходе."
 echo
+
+# Рабочий каталог для статистики воркеров нагрузки
+WORKDIR="$(mktemp -d 2>/dev/null || echo "/tmp/xbm.$$")"; mkdir -p "$WORKDIR"
+STOP_FLAG="$WORKDIR/stop"
+declare -a LOAD_PIDS=()
+
+cleanup() {
+  touch "$STOP_FLAG" 2>/dev/null
+  if [[ ${#LOAD_PIDS[@]} -gt 0 ]]; then
+    for p in "${LOAD_PIDS[@]}"; do kill "$p" 2>/dev/null; done
+    for p in "${LOAD_PIDS[@]}"; do wait "$p" 2>/dev/null; done
+  fi
+}
+
+# Считать суммарную статистику нагрузки: "reqs bytes"
+load_stats() {
+  local tr=0 tb=0 r b f
+  for f in "$WORKDIR"/w*; do
+    [[ -f "$f" ]] || continue
+    read -r r b < "$f" 2>/dev/null || continue
+    [[ "$r" =~ ^[0-9]+$ ]] && tr=$(( tr + r ))
+    [[ "$b" =~ ^[0-9]+$ ]] && tb=$(( tb + b ))
+  done
+  echo "$tr $tb"
+}
+
+# Запуск воркеров нагрузки
+if [[ "$LOAD" -eq 1 ]]; then
+  for i in $(seq 1 "$LOAD_WORKERS"); do
+    load_worker "$IP" "$PORT" "$SNI" "$WORKDIR/w$i" "$STOP_FLAG" &
+    LOAD_PIDS+=("$!")
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # Состояние/статистика
@@ -184,6 +267,7 @@ START="$(now)"
 node_state="unknown"          # up | down
 last_change="$START"
 first_block=0
+first_block_bytes=0           # объём нагрузки на момент первого блока
 declare -a block_durs=()      # длительности завершённых DOWN-эпизодов
 declare -a up_durs=()         # длительности завершённых UP-эпизодов (между блоками)
 declare -a timeline=()        # 'U'/'D' по каждому циклу — для «осциллограммы»
@@ -211,6 +295,18 @@ summarize() {
   printf "  Причины DOWN:            timeout=%d  reset=%d%s\n" "$r_timeout" "$r_reset" \
     "$([[ $DO_TLS -eq 1 ]] && printf '  tls=%d' "$r_tls")"
   (( ctrl_down > 0 )) && log_warn "Контрольный хост был недоступен в $ctrl_down проб(ах) — часть простоя может быть общим сбоем канала."
+
+  # Статистика сгенерированной нагрузки
+  if [[ "$LOAD" -eq 1 ]]; then
+    local ls lr lb rate=""
+    ls="$(load_stats)"; lr="${ls% *}"; lb="${ls#* }"
+    (( run > 0 && lb > 0 )) && rate="  (~$(human_bytes $(( lb / run ))) /с)"
+    echo "  Нагрузка сгенерирована:  $lr запрос(ов), $(human_bytes "$lb")$rate"
+    if (( first_block > 0 )); then
+      [[ "$first_block_bytes" =~ ^[0-9]+$ ]] || first_block_bytes=0
+      echo "  ${C_DIM}До первого блока прокачано ~$(human_bytes "$first_block_bytes") под нагрузкой${C_RESET}"
+    fi
+  fi
 
   # «Осциллограмма» доступности
   local tl="" c
@@ -317,7 +413,10 @@ while :; do
       dur=$(( ts - last_change ))
       if [[ "$node_state" == "up" ]]; then up_durs+=("$dur"); else block_durs+=("$dur"); fi
     fi
-    if [[ "$cur" == "down" && "$first_block" -eq 0 ]]; then first_block="$ts"; fi
+    if [[ "$cur" == "down" && "$first_block" -eq 0 ]]; then
+      first_block="$ts"
+      if [[ "$LOAD" -eq 1 ]]; then fb_ls="$(load_stats)"; first_block_bytes="${fb_ls#* }"; fi
+    fi
     node_state="$cur"; last_change="$ts"
     if [[ "$was_unknown" -eq 1 ]]; then
       # самое первое измерение — стартовое состояние, без «снова»
@@ -355,4 +454,6 @@ while :; do
   [[ "$STOP" -eq 1 ]] && break
 done
 
+cleanup            # остановить воркеры нагрузки и зафиксировать финальную статистику
 summarize
+rm -rf "$WORKDIR" 2>/dev/null
