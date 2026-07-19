@@ -80,7 +80,7 @@ GEOIP_URL_2="https://github.com/1andrevich/Re-filter-lists/releases/latest/downl
 
 curl -fsSL "$GEOSITE_URL" -o "$TMPDIR/geosite.dat"
 curl -fsSL "$GEOSITE_URL_2" -o "$TMPDIR/refilter.dat"
-curl -fsSL "$GEOSITE_URL_2" -o "$TMPDIR/refilter_ip.dat"
+curl -fsSL "$GEOIP_URL_2" -o "$TMPDIR/refilter_ip.dat"
 
 mv "$TMPDIR/geosite.dat" "$DIR/geosite.dat"
 mv "$TMPDIR/refilter.dat" "$DIR/refilter.dat"
