@@ -75,10 +75,16 @@ TMPDIR="$(mktemp -d)"
 mkdir -p "$DIR"
 
 GEOSITE_URL="https://github.com/v2ray/domain-list-community/releases/latest/download/dlc.dat"
+GEOSITE_URL_2="https://github.com/1andrevich/Re-filter-lists/releaseslatest/download/geosite.dat"
+GEOIP_URL_2="https://github.com/1andrevich/Re-filter-lists/releaseslatest/download/geoip.dat"
 
 curl -fsSL "$GEOSITE_URL" -o "$TMPDIR/geosite.dat"
+curl -fsSL "$GEOSITE_URL_2" -o "$TMPDIR/refilter.dat"
+curl -fsSL "$GEOSITE_URL_2" -o "$TMPDIR/refilter_ip.dat"
 
 mv "$TMPDIR/geosite.dat" "$DIR/geosite.dat"
+mv "$TMPDIR/refilter.dat" "$DIR/refilter.dat"
+mv "$TMPDIR/refilter_ip.dat" "$DIR/refilter_ip.dat"
 rm -rf "$TMPDIR"
 
 docker restart remnanode
