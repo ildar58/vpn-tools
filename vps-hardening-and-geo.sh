@@ -74,7 +74,7 @@ DIR="/opt/remnanode/xray/share"
 TMPDIR="$(mktemp -d)"
 mkdir -p "$DIR"
 
-GEOSITE_URL="https://github.com/v2ray/domain-list-community/releases/latest/download/dlc.dat"
+GEOSITE_URL="https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
 GEOSITE_URL_2="https://github.com/1andrevich/Re-filter-lists/releases/latest/download/geosite.dat"
 GEOIP_URL_2="https://github.com/1andrevich/Re-filter-lists/releases/latest/download/geoip.dat"
 
