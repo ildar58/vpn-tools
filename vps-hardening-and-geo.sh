@@ -74,14 +74,11 @@ DIR="/opt/remnanode/xray/share"
 TMPDIR="$(mktemp -d)"
 mkdir -p "$DIR"
 
-GEOSITE_URL="https://github.com/hydraponique/roscomvpn-geosite/releases/latest/download/geosite.dat"
-GEOIP_URL="https://github.com/hydraponique/roscomvpn-geoip/releases/latest/download/geoip.dat"
+GEOSITE_URL="https://github.com/v2ray/domain-list-community/releases/latest/download/dlc.dat"
 
 curl -fsSL "$GEOSITE_URL" -o "$TMPDIR/geosite.dat"
-curl -fsSL "$GEOIP_URL" -o "$TMPDIR/geoip.dat"
 
 mv "$TMPDIR/geosite.dat" "$DIR/geosite.dat"
-mv "$TMPDIR/geoip.dat" "$DIR/geoip-custom.dat"
 rm -rf "$TMPDIR"
 
 docker restart remnanode
